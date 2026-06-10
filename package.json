@@ -4,6 +4,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/start.js",
+    "test": "node --test tests/",
     "dev": "nodemon src/server.js",
     "pm2": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop qwen2api",
