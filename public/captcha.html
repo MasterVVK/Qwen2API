@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Qwen2API — Captcha Bypass Status</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #0f1419; color: #e6e6e6; padding: 24px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 16px; color: #fff; }
+  h2 { font-size: 16px; margin-bottom: 12px; color: #cfd5dd; }
+  .card { background: #1a1f29; border: 1px solid #2a313e; border-radius: 8px;
+          padding: 20px; margin-bottom: 16px; }
+  .key { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; }
+  .key input { flex: 1; padding: 8px 12px; background: #0f1419; border: 1px solid #2a313e;
+               color: #fff; border-radius: 6px; font-family: ui-monospace, monospace; }
+  .key .label { color: #9aa5b1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #2a313e; }
+  th { color: #9aa5b1; font-weight: 500; background: #141923; font-size: 12px;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  td.email { font-family: ui-monospace, monospace; font-size: 12px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+  td.x5sec { font-family: ui-monospace, monospace; font-size: 11px; color: #94a3b8; }
+
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; vertical-align: middle; }
+  .dot.green { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+  .dot.yellow { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+  .dot.red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .dot.gray { background: #64748b; }
+
+  button { background: #3b82f6; color: white; border: none; padding: 6px 14px;
+           border-radius: 6px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #2563eb; }
+  button:disabled { background: #475569; cursor: not-allowed; }
+  button.global { padding: 10px 20px; font-size: 14px; }
+
+  #log { font-family: ui-monospace, monospace; font-size: 12px; max-height: 200px;
+         overflow-y: auto; background: #0a0e14; padding: 12px; border-radius: 4px;
+         color: #94a3b8; white-space: pre-wrap; }
+
+  .muted { color: #64748b; }
+  .ok { color: #4ade80; }
+  .fail { color: #ef4444; }
+</style>
+</head>
+<body>
+<h1>🛡️ Captcha Bypass — per-account</h1>
+
+<div class="key">
+  <span class="label">API key:</span>
+  <input id="apikey" type="password" value="sk-123456">
+</div>
+
+<div class="card">
+  <h2>Аккаунты и их x5sec</h2>
+  <table id="accountsTable">
+    <thead><tr>
+      <th>Email</th>
+      <th>Status</th>
+      <th>Age</th>
+      <th>x5sec prefix</th>
+      <th>Refresh</th>
+    </tr></thead>
+    <tbody id="accountsBody"><tr><td colspan="5" class="muted">загрузка…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Daemon (последние запуски bypass)</h2>
+  <table id="daemonTable">
+    <thead><tr>
+      <th>Email</th>
+      <th>Когда</th>
+      <th>Результат</th>
+      <th>Длительность</th>
+      <th>x5sec / ошибка</th>
+    </tr></thead>
+    <tbody id="daemonBody"><tr><td colspan="5" class="muted">загрузка…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>События</h2>
+  <div id="log">ожидание…</div>
+</div>
+
+<script>
+const getKey = () => document.getElementById('apikey').value.trim() || 'sk-123456'
+const log = msg => {
+    const t = new Date().toLocaleTimeString()
+    const el = document.getElementById('log')
+    el.textContent = `[${t}] ${msg}\n` + el.textContent
+}
+
+async function fetchStatus() {
+    try {
+        const r = await fetch('/api/captcha/status', { headers: { 'Authorization': 'Bearer ' + getKey() } })
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return await r.json()
+    } catch (e) {
+        log('status error: ' + e.message)
+        return null
+    }
+}
+
+function fmtTime(ts) {
+    if (!ts) return '—'
+    const d = new Date(ts)
+    return d.toLocaleTimeString()
+}
+function fmtAge(ms) {
+    if (ms == null) return '—'
+    const sec = Math.floor(ms / 1000)
+    if (sec < 60) return `${sec}s`
+    if (sec < 3600) return `${Math.floor(sec/60)}m ${sec%60}s`
+    return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m`
+}
+
+function statusForAccount(rec) {
+    const ageMin = rec.ageMs != null ? rec.ageMs / 60000 : null
+    if (!rec.length || rec.length === 0) return { color: 'gray', text: 'нет cookies' }
+    if (ageMin == null) return { color: 'gray', text: 'cookies без возраста' }
+    if (ageMin < 20) return { color: 'green', text: 'свежие' }
+    if (ageMin < 30) return { color: 'yellow', text: 'к TTL' }
+    return { color: 'red', text: 'умерли' }
+}
+
+async function manualRefresh(email) {
+    const btn = document.querySelector(`button[data-email="${email}"]`)
+    if (btn) { btn.disabled = true; btn.textContent = '⏳' }
+    log(`refresh запущен для ${email}…`)
+    try {
+        const r = await fetch(`/api/captcha/refresh?email=${encodeURIComponent(email)}`, {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + getKey() }
+        })
+        const j = await r.json()
+        if (j.ok) log(`refresh ${email} ok за ${j.ms} мс`)
+        else log(`refresh ${email} fail [${j.step}]: ${j.error}`)
+    } catch (e) {
+        log(`refresh ${email} error: ` + e.message)
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '↻' }
+        fetchStatus().then(render)
+    }
+}
+window.manualRefresh = manualRefresh
+
+function render(s) {
+    if (!s) return
+    const accs = s.accounts || []
+
+    // sort: alphabetic
+    accs.sort((a, b) => a.email.localeCompare(b.email))
+
+    const tbody = document.getElementById('accountsBody')
+    if (!accs.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">аккаунтов нет</td></tr>'
+    } else {
+        tbody.innerHTML = accs.map(a => {
+            const st = statusForAccount(a)
+            const x5 = a.x5secPrefix ? `<span class="x5sec">${a.x5secPrefix}…</span>` : '<span class="muted">—</span>'
+            return `<tr>
+                <td class="email">${a.email}</td>
+                <td><span class="dot ${st.color}"></span> ${st.text}</td>
+                <td>${fmtAge(a.ageMs)}</td>
+                <td>${x5}</td>
+                <td><button data-email="${a.email}" onclick="manualRefresh('${a.email.replace(/'/g, "\\'")}')">↻</button></td>
+            </tr>`
+        }).join('')
+    }
+
+    // daemon history flatten
+    const daemonAccounts = (s.daemon && s.daemon.accounts) || {}
+    const histRows = []
+    for (const [email, info] of Object.entries(daemonAccounts)) {
+        for (const h of (info.history || [])) {
+            histRows.push({ email, ...h })
+        }
+    }
+    histRows.sort((a, b) => b.ts - a.ts)
+
+    const dbody = document.getElementById('daemonBody')
+    if (!histRows.length) {
+        dbody.innerHTML = '<tr><td colspan="5" class="muted">пусто</td></tr>'
+    } else {
+        dbody.innerHTML = histRows.slice(0, 30).map(h => `
+            <tr>
+                <td class="email">${h.email}</td>
+                <td>${fmtTime(h.ts)}</td>
+                <td class="${h.ok ? 'ok' : 'fail'}">${h.ok ? '✅ ok' : '❌ fail'}</td>
+                <td>${h.ms} ms</td>
+                <td class="x5sec">${h.ok ? (h.x5sec_prefix || '') : (h.error || '')}</td>
+            </tr>
+        `).join('')
+    }
+}
+
+fetchStatus().then(render)
+setInterval(() => fetchStatus().then(render), 5000)
+log('UI loaded')
+</script>
+</body>
+</html>

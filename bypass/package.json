@@ -1,0 +1,13 @@
+{
+  "name": "qwen2api-bypass-daemon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Captcha bypass daemon for Qwen2API — runs on host, talks to chromium container via CDP",
+  "main": "daemon.js",
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
