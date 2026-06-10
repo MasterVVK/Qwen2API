@@ -1,4 +1,4 @@
-const { isJson, generateUUID } = require('../utils/tools.js')
+const { isJson, generateUUID, nowEpochSeconds } = require('../utils/tools.js')
 const { detectTruncation } = require('../utils/truncation.js')
 const { createUsageObject } = require('../utils/precise-tokenizer.js')
 const { sendChatRequest } = require('../utils/request.js')
@@ -141,7 +141,7 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
             res.write(`data: ${JSON.stringify({
                 "id": `chatcmpl-${message_id}`,
                 "object": "chat.completion.chunk",
-                "created": Math.round(new Date().getTime() / 1000),
+                "created": nowEpochSeconds(),
                 "choices": [
                     {
                         "index": 0,
@@ -166,7 +166,7 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
                 const headerDelta = {
                     "id": `chatcmpl-${message_id}`,
                     "object": "chat.completion.chunk",
-                    "created": Math.round(new Date().getTime() / 1000),
+                    "created": nowEpochSeconds(),
                     "choices": [
                         {
                             "index": 0,
@@ -195,7 +195,7 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
                     const argDelta = {
                         "id": `chatcmpl-${message_id}`,
                         "object": "chat.completion.chunk",
-                        "created": Math.round(new Date().getTime() / 1000),
+                        "created": nowEpochSeconds(),
                         "choices": [
                             {
                                 "index": 0,
@@ -411,14 +411,14 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
         res.write(`data: ${JSON.stringify({
             "id": `chatcmpl-${message_id}`,
             "object": "chat.completion.chunk",
-            "created": Math.round(new Date().getTime() / 1000),
+            "created": nowEpochSeconds(),
             "choices": [finalChoice]
         })}\n\n`)
 
         res.write(`data: ${JSON.stringify({
             "id": `chatcmpl-${message_id}`,
             "object": "chat.completion.chunk",
-            "created": Math.round(new Date().getTime() / 1000),
+            "created": nowEpochSeconds(),
             "choices": [],
             "usage": totalTokens
         })}\n\n`)
@@ -665,7 +665,7 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
         const bodyTemplate = {
             "id": `chatcmpl-${generateUUID()}`,
             "object": "chat.completion",
-            "created": Math.round(new Date().getTime() / 1000),
+            "created": nowEpochSeconds(),
             "model": model,
             "choices": [choice],
             "usage": totalTokens

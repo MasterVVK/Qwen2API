@@ -45,10 +45,14 @@ const generateUUID = () => {
   return crypto.randomUUID()
 }
 
+// Unix epoch in seconds — the `created` field of OpenAI completion objects.
+const nowEpochSeconds = () => Math.round(Date.now() / 1000)
+
 module.exports = {
   isJson,
   sleep,
   sha256Encrypt,
   JwtDecode,
-  generateUUID
+  generateUUID,
+  nowEpochSeconds
 }

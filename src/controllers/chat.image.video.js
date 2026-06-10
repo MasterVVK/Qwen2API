@@ -4,6 +4,7 @@ const { setResponseHeaders } = require('./chat.js')
 const accountManager = require('../utils/account.js')
 const { sleep } = require('../utils/tools.js')
 const { generateChatID } = require('../utils/request.js')
+const { buildUpstreamHeaders } = require('../utils/upstream-headers.js')
 const { uploadFileToQwenOss } = require('../utils/upload.js')
 const { parserModel } = require('../utils/chat-helpers.js')
 const { getDefaultModelByChatType } = require('../models/models-map.js')
@@ -1364,26 +1365,12 @@ const generateImageVideoResult = async (payload) => {
         logger.info(`图片视频流策略: upstream=${upstreamStream} downstream=${payload.stream === true}`, 'CHAT')
 
         const requestConfig = {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-                "Connection": "keep-alive",
-                "Accept": upstreamStream ? "text/event-stream" : "application/json",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Content-Type": "application/json",
-                "Timezone": "Mon Dec 08 2025 17:28:55 GMT+0800",
-                "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
-                "source": "web",
-                "Version": "0.1.13",
-                "bx-v": "2.5.31",
-                "Origin": chatBaseUrl,
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                "Referer": `${chatBaseUrl}/c/guest`,
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                ...(cookieHeader && { "Cookie": cookieHeader }),
-            },
+            headers: buildUpstreamHeaders({
+                token,
+                chatBaseUrl,
+                cookieHeader,
+                accept: upstreamStream ? "text/event-stream" : "application/json",
+            }),
             responseType: newChatType === 't2v' ? 'json' : (upstreamStream ? 'stream' : 'text'),
             timeout: 1000 * 60 * 5
         }

@@ -6,6 +6,7 @@ const { getSsxmodItna, getSsxmodItna2, getCookieHeader } = require('./ssxmod-man
 const { triggerInBackground: triggerCaptchaBypass, triggerAndWait, detectBlock } = require('./captcha-trigger')
 const { PassThrough, Readable } = require('stream')
 const { sniffOrRestore } = require('./stream-sniff')
+const { buildUpstreamHeaders } = require('./upstream-headers')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('./proxy-helper')
 
 // 传输层（非 HTTP）错误码 — 这些重试的, HTTP 响应不重试
@@ -51,26 +52,11 @@ const sendChatRequest = async (body) => {
 
     // 构建请求配置
     const requestConfig = {
-        headers: {
-            'Authorization': `Bearer ${currentToken}`,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-            "Connection": "keep-alive",
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
-            "Content-Type": "application/json",
-            "Timezone": "Mon Dec 08 2025 17:28:55 GMT+0800",
-            "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
-            "source": "web",
-            "Version": "0.1.13",
-            "bx-v": "2.5.31",
-            "Origin": chatBaseUrl,
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-            "Referer": `${chatBaseUrl}/c/guest`,
-            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cookie": getCookieHeader(currentAccount),
-        },
+        headers: buildUpstreamHeaders({
+            token: currentToken,
+            chatBaseUrl,
+            cookieHeader: getCookieHeader(currentAccount),
+        }),
         responseType: 'stream', // Always use streaming (upstream doesn't support stream=false)
         timeout: 60 * 1000,
     }
@@ -204,26 +190,11 @@ const generateChatID = async (currentToken, model, account) => {
         const proxyAgent = getProxyAgent(account)
 
         const requestConfig = {
-            headers: {
-                'Authorization': `Bearer ${currentToken}`,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-                "Connection": "keep-alive",
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Content-Type": "application/json",
-                "Timezone": "Mon Dec 08 2025 17:28:55 GMT+0800",
-                "sec-ch-ua": "\"Microsoft Edge\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
-                "source": "web",
-                "Version": "0.1.13",
-                "bx-v": "2.5.31",
-                "Origin": chatBaseUrl,
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                "Referer": `${chatBaseUrl}/c/guest`,
-                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cookie": getCookieHeader(account),
-            }
+            headers: buildUpstreamHeaders({
+                token: currentToken,
+                chatBaseUrl,
+                cookieHeader: getCookieHeader(account),
+            })
         }
 
         // 添加代理配置
