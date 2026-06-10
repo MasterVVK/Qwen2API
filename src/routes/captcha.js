@@ -16,8 +16,7 @@ const {
 const { getProxyAgent, getChatBaseUrl } = require('../utils/proxy-helper')
 const accountManager = require('../utils/account.js')
 const { logger } = require('../utils/logger')
-
-const DAEMON_URL = process.env.CAPTCHA_DAEMON_URL || 'http://192.168.0.58:9099'
+const { DAEMON_URL } = require('../utils/daemon-client')
 
 function daemonRequest(reqPath, opts = {}) {
     return new Promise((resolve, reject) => {

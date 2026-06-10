@@ -5,8 +5,8 @@
  */
 const http = require('http')
 const { logger } = require('./logger')
+const { DAEMON_URL } = require('./daemon-client')
 
-const DAEMON_URL = process.env.CAPTCHA_DAEMON_URL || 'http://192.168.0.58:9099'
 const COOLDOWN_MS = 30 * 1000 // don't re-trigger more often than once per 30s per email
 
 // Per-email state
