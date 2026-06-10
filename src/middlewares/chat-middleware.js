@@ -31,7 +31,13 @@ const processRequestBody = async (req, res, next) => {
       thinking_budget,      // 思考预算
       size,                  //图片尺寸
       tools,                // 工具列表（OpenAI function calling）
-      tool_choice           // 工具调用控制
+      tool_choice,          // 工具调用控制
+      max_tokens,           // 最大输出 token 数（OpenAI 兼容）
+      max_completion_tokens,// 最大补全 token 数（OpenAI 新字段）
+      temperature,
+      top_p,
+      presence_penalty,
+      frequency_penalty
     } = req.body
 
     // 处理 stream 参数
@@ -98,6 +104,16 @@ const processRequestBody = async (req, res, next) => {
     if (size) {
       body.size = size
     }
+
+    // 透传 OpenAI 兼容的生成控制参数到上游 (max_tokens / temperature / top_p / penalties)
+    const effectiveMaxTokens = max_completion_tokens ?? max_tokens
+    if (Number.isFinite(Number(effectiveMaxTokens)) && Number(effectiveMaxTokens) > 0) {
+      body.max_tokens = Number(effectiveMaxTokens)
+    }
+    if (Number.isFinite(Number(temperature))) body.temperature = Number(temperature)
+    if (Number.isFinite(Number(top_p))) body.top_p = Number(top_p)
+    if (Number.isFinite(Number(presence_penalty))) body.presence_penalty = Number(presence_penalty)
+    if (Number.isFinite(Number(frequency_penalty))) body.frequency_penalty = Number(frequency_penalty)
 
     // 处理请求体,将body赋值给req.body
     req.body = body

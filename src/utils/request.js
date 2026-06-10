@@ -2,7 +2,70 @@ const axios = require('axios')
 const accountManager = require('./account.js')
 const config = require('../config/index.js')
 const { logger } = require('./logger')
-const { getSsxmodItna, getSsxmodItna2 } = require('./ssxmod-manager')
+const { getSsxmodItna, getSsxmodItna2, getCookieHeader } = require('./ssxmod-manager')
+const { triggerInBackground: triggerCaptchaBypass, triggerAndWait, detectBlock } = require('./captcha-trigger')
+const { PassThrough, Readable } = require('stream')
+
+/**
+ * Read ahead up to 4KB from an upstream stream to determine if it's a WAF block.
+ * If a block is detected, returns { block, buffer } so the caller can discard.
+ * If clean, returns { block: null, restoredStream } — a new readable that replays
+ * the sniffed bytes followed by the rest of the original stream.
+ */
+function sniffOrRestore(stream, opts = {}) {
+    const maxBytes = opts.maxBytes || 4096
+    const timeoutMs = opts.timeoutMs || 5000
+    return new Promise((resolve) => {
+        const chunks = []
+        let total = 0
+        let done = false
+        let upstreamEnded = false
+        const finalize = (block) => {
+            if (done) return
+            done = true
+            clearTimeout(timer)
+            stream.removeListener('data', onData)
+            stream.removeListener('end', onEnd)
+            stream.removeListener('error', onErr)
+            if (block) {
+                stream.resume()
+                resolve({ block, restoredStream: null })
+            } else {
+                const restored = new PassThrough()
+                for (const c of chunks) restored.write(c)
+                if (upstreamEnded) {
+                    // upstream already finished — no more data is coming
+                    restored.end()
+                } else {
+                    stream.on('data', c => restored.write(c))
+                    stream.on('end', () => restored.end())
+                    stream.on('error', err => restored.destroy(err))
+                }
+                resolve({ block: null, restoredStream: restored })
+            }
+        }
+        const onData = c => {
+            chunks.push(c); total += c.length
+            if (total >= maxBytes) {
+                const text = Buffer.concat(chunks).toString('utf8').slice(0, maxBytes)
+                finalize(detectBlock(text))
+            }
+        }
+        const onEnd = () => {
+            upstreamEnded = true
+            const text = Buffer.concat(chunks).toString('utf8')
+            finalize(detectBlock(text))
+        }
+        const onErr = () => finalize(null)
+        const timer = setTimeout(() => {
+            // Took too long — assume not a block, restore stream as-is
+            finalize(null)
+        }, timeoutMs)
+        stream.on('data', onData)
+        stream.on('end', onEnd)
+        stream.on('error', onErr)
+    })
+}
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('./proxy-helper')
 
 // 传输层（非 HTTP）错误码 — 这些重试的, HTTP 响应不重试
@@ -66,7 +129,7 @@ const sendChatRequest = async (body) => {
             "Sec-Fetch-Dest": "empty",
             "Referer": `${chatBaseUrl}/c/guest`,
             "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cookie": `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}`,
+            "Cookie": getCookieHeader(currentAccount),
         },
         responseType: 'stream', // Always use streaming (upstream doesn't support stream=false)
         timeout: 60 * 1000,
@@ -76,6 +139,12 @@ const sendChatRequest = async (body) => {
     if (proxyAgent) {
         requestConfig.httpsAgent = proxyAgent
         requestConfig.proxy = false // 禁用axios默认代理，使用httpsAgent
+    }
+    // DEBUG: какой proxy используется для этого запроса
+    if (process.env.DEBUG_RAW_UPSTREAM === '1') {
+        const acc = currentAccount?.email || '(none)'
+        const px = currentAccount?.proxy || '(global PROXY_URL or none)'
+        logger.info(`account=${acc}  account.proxy=${px}  agent=${proxyAgent ? 'set' : 'NONE'}`, 'DEBUG-PROXY')
     }
 
     const chat_id = await generateChatID(currentToken, body.model, currentAccount)
@@ -93,21 +162,40 @@ const sendChatRequest = async (body) => {
                 logger.network(`发送聊天请求`, 'REQUEST')
             }
             const response = await axios.post(url, payload, requestConfig)
-            if (response.status === 200) {
-                // 返回 currentAccount——调用方在消费完 stream 后据此累计 stats
-                // 注意：当前实现单次尝试都用同一个 currentAccount（不轮换），
-                // 如果未来 retry 切换账号，需要在切换处更新 currentAccount 引用
-                return {
-                    currentToken,
-                    currentAccount,
-                    status: true,
-                    response: response.data
-                }
+            logger.info(`upstream status=${response.status} hasPipe=${typeof response?.data?.pipe === 'function'}`, 'REQUEST')
+            if (response.status !== 200) {
+                lastError = new Error(`Unexpected status ${response.status}`)
+                lastError.response = { status: response.status }
+                break
             }
-            // 非 200 但是没抛——退出循环, 走下面错误分类
-            lastError = new Error(`Unexpected status ${response.status}`)
-            lastError.response = { status: response.status }
-            break
+            if (!response.data || typeof response.data.pipe !== 'function') {
+                return { currentToken, currentAccount, status: true, response: response.data }
+            }
+
+            // Sniff first ~4KB to detect WAF block before forwarding stream to client.
+            const { block, restoredStream } = await sniffOrRestore(response.data, { maxBytes: 4096, timeoutMs: 5000 })
+            logger.info(`sniff done: block=${block?.kind || 'none'}`, 'REQUEST')
+
+            if (process.env.DEBUG_RAW_UPSTREAM === '1' && block) {
+                logger.info(`upstream WAF block detected: ${block.kind}${block.url ? ' (URL captured)' : ''}`, 'DEBUG')
+            }
+
+            if (block) {
+                // WAF block detected. Fire-and-forget the bypass (will populate
+                // accountCookies for the next request) and return 503 to the caller
+                // immediately. The caller can retry in ~30s with the fresh cookies.
+                logger.warn(`WAF block (${block.kind}) for ${currentAccount?.email} — triggering background bypass`, 'REQUEST')
+                triggerCaptchaBypass(block.kind, {
+                    email: currentAccount && currentAccount.email,
+                    captchaUrl: block.url,
+                })
+                lastError = new Error(`WAF block: ${block.kind}; retry in ~30s with fresh cookies`)
+                lastError.response = { status: 503, code: 'waf_block' }
+                break
+            }
+
+            // Clean stream — return to client
+            return { currentToken, currentAccount, status: true, response: restoredStream }
         } catch (error) {
             lastError = error
             if (isRetryableNetworkError(error) && attempt < totalAttempts) {
@@ -150,9 +238,16 @@ const sendChatRequest = async (body) => {
         logger.error('发送聊天请求失败', 'REQUEST', '', lastError.message)
     }
 
+    // Surface a structured error so the controller can return proper HTTP code.
+    const errInfo = {
+        message: lastError?.message || 'request failed',
+        status: lastError?.response?.status || 502,
+        code: lastError?.response?.code || 'upstream_error',
+    }
     return {
         status: false,
-        response: null
+        response: null,
+        error: errInfo,
     }
 }
 
@@ -187,7 +282,7 @@ const generateChatID = async (currentToken, model, account) => {
                 "Sec-Fetch-Dest": "empty",
                 "Referer": `${chatBaseUrl}/c/guest`,
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Cookie": `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}`,
+                "Cookie": getCookieHeader(account),
             }
         }
 

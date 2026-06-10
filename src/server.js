@@ -37,6 +37,7 @@ app.use(anthropicRouter)
 app.use(verifyRouter)
 app.use('/api', accountsRouter)
 app.use('/api', settingsRouter)
+app.use('/api', require('./routes/captcha.js'))
 
 app.use(express.static(path.join(__dirname, '../public/dist')))
 

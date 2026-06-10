@@ -1,4 +1,26 @@
 const { isJson, generateUUID } = require('../utils/tools.js')
+
+/**
+ * Detect a truncated thinking response (upstream Qwen has a hard cap on
+ * completion tokens; thinking-mode sometimes spends the whole budget on
+ * reasoning and returns an unclosed <think> block with finish_reason='stop').
+ * Returns null if content looks complete, or { reason } describing the issue.
+ *
+ * Heuristics:
+ *   - <think> opened but no </think> at all
+ *   - <think> appears after the last </think> (second thinking section
+ *     started but never closed)
+ */
+const detectTruncation = (content) => {
+    if (typeof content !== 'string' || !content) return null
+    const lastOpen = content.lastIndexOf('<think>')
+    if (lastOpen === -1) return null
+    const lastClose = content.lastIndexOf('</think>')
+    if (lastClose === -1 || lastClose < lastOpen) {
+        return { reason: 'thinking_truncated' }
+    }
+    return null
+}
 const { createUsageObject } = require('../utils/precise-tokenizer.js')
 const { sendChatRequest } = require('../utils/request.js')
 const { createToolCallStreamParser, parseToolCallsFromText } = require('../utils/tool-prompt.js')
@@ -391,18 +413,27 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
         // 全归属主账户是可接受的精度损失（PR #3wg.1 epic notes 已记）
         attributeChatUsage(options.currentAccount, totalTokens)
 
-        const finishReason = (toolParser && toolParser.hasEmittedAnyCall()) ? 'tool_calls' : 'stop'
+        const hasToolCalls = !!(toolParser && toolParser.hasEmittedAnyCall())
+        let finishReason = hasToolCalls ? 'tool_calls' : 'stop'
+        const finalChoice = {
+            "index": 0,
+            "delta": {},
+            "finish_reason": finishReason
+        }
+        if (!hasToolCalls) {
+            const truncation = detectTruncation(completionContent)
+            if (truncation) {
+                finishReason = 'length'
+                finalChoice.finish_reason = 'length'
+                finalChoice.incomplete_details = { reason: truncation.reason }
+                logger.warn(`upstream truncation detected (${truncation.reason}) — sending finish_reason=length`, 'CHAT')
+            }
+        }
         res.write(`data: ${JSON.stringify({
             "id": `chatcmpl-${message_id}`,
             "object": "chat.completion.chunk",
             "created": Math.round(new Date().getTime() / 1000),
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": finishReason
-                }
-            ]
+            "choices": [finalChoice]
         })}\n\n`)
 
         res.write(`data: ${JSON.stringify({
@@ -638,18 +669,26 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
             assistantMessage.tool_calls = toolCalls
         }
 
+        const hasToolCalls = toolCalls.length > 0
+        const choice = {
+            "index": 0,
+            "message": assistantMessage,
+            "finish_reason": hasToolCalls ? "tool_calls" : "stop"
+        }
+        if (!hasToolCalls) {
+            const truncation = detectTruncation(assistantContent)
+            if (truncation) {
+                choice.finish_reason = 'length'
+                choice.incomplete_details = { reason: truncation.reason }
+                logger.warn(`upstream truncation detected (${truncation.reason}) — sending finish_reason=length`, 'CHAT')
+            }
+        }
         const bodyTemplate = {
             "id": `chatcmpl-${generateUUID()}`,
             "object": "chat.completion",
             "created": Math.round(new Date().getTime() / 1000),
             "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": assistantMessage,
-                    "finish_reason": toolCalls.length > 0 ? "tool_calls" : "stop"
-                }
-            ],
+            "choices": [choice],
             "usage": totalTokens
         }
         res.json(bodyTemplate)
@@ -678,10 +717,26 @@ const handleChatCompletion = async (req, res) => {
         const response_data = await sendChatRequest(req.body)
 
         if (!response_data.status || !response_data.response) {
-            res.status(500)
-                .json({
-                    error: "Request failed"
+            const err = response_data.error || {}
+            const httpStatus = err.status || 502
+            if (httpStatus === 503 && (err.code === 'waf_block' || err.code === 'waf_block_persistent')) {
+                res.set('Retry-After', '30')
+                res.status(503).json({
+                    error: {
+                        type: 'captcha_required',
+                        code: err.code,
+                        message: 'Upstream Aliyun WAF requires captcha verification. Auto-bypass triggered, please retry in ~30s.',
+                    }
                 })
+            } else {
+                res.status(httpStatus).json({
+                    error: {
+                        type: 'upstream_error',
+                        code: err.code || 'request_failed',
+                        message: err.message || 'Request failed',
+                    }
+                })
+            }
             return
         }
 

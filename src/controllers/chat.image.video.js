@@ -7,36 +7,25 @@ const { generateChatID } = require('../utils/request.js')
 const { uploadFileToQwenOss } = require('../utils/upload.js')
 const { parserModel } = require('../utils/chat-helpers.js')
 const { getDefaultModelByChatType } = require('../models/models-map.js')
-const { getSsxmodItna, getSsxmodItna2 } = require('../utils/ssxmod-manager')
+const { getSsxmodItna, getSsxmodItna2, getCookieHeader } = require('../utils/ssxmod-manager')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../utils/proxy-helper')
 
 const DATA_URI_REGEX = /^data:(.+);base64,(.*)$/i
 const HTTP_URL_REGEX = /^https?:\/\//i
 
 /**
- * 构造与当前账号一致的上游 Cookie 头
- * @param {string} token - 当前账号令牌
- * @returns {string} Cookie 头
+ * Construct upstream Cookie header — prefers per-account x5sec jar (if available),
+ * falls back to generated SSXMOD. Always prepends `token=<jwt>` for image/video
+ * endpoints that look up sessions via cookie token.
+ * @param {string} token - account JWT
+ * @param {object} [account] - account object (preferred — used for per-account x5sec lookup)
  */
-const buildUpstreamCookieHeader = (token) => {
-    const cookieParts = []
-
-    if (token) {
-        cookieParts.push(`token=${token}`)
+const buildUpstreamCookieHeader = (token, account) => {
+    const base = getCookieHeader(account)
+    if (token && !/(?:^|;\s*)token=/.test(base)) {
+        return `token=${token}; ${base}`
     }
-
-    const ssxmodItna = getSsxmodItna()
-    const ssxmodItna2 = getSsxmodItna2()
-
-    if (ssxmodItna) {
-        cookieParts.push(`ssxmod_itna=${ssxmodItna}`)
-    }
-
-    if (ssxmodItna2) {
-        cookieParts.push(`ssxmod_itna2=${ssxmodItna2}`)
-    }
-
-    return cookieParts.join('; ')
+    return base
 }
 
 /**
@@ -1036,7 +1025,7 @@ const getChatDetail = async (chatID, token) => {
         // 通过 token 反查 account 解析账号级代理（找不到则回退到全局 PROXY_URL）
         const account = accountManager.getAccountByToken(token)
         const proxyAgent = getProxyAgent(account)
-        const cookieHeader = buildUpstreamCookieHeader(token)
+        const cookieHeader = buildUpstreamCookieHeader(token, account)
 
         const requestConfig = {
             headers: {
@@ -1362,7 +1351,7 @@ const generateImageVideoResult = async (payload) => {
 
         const chatBaseUrl = getChatBaseUrl()
         const proxyAgent = getProxyAgent(account)
-        const cookieHeader = buildUpstreamCookieHeader(token)
+        const cookieHeader = buildUpstreamCookieHeader(token, account)
 
         logger.info('发送图片视频请求', 'CHAT')
         logger.info(`选择图片: ${selectedImageList[selectedImageList.length - 1] || '未选择图片，切换生成图/视频模式'}`, 'CHAT')
@@ -1854,7 +1843,7 @@ const getVideoTaskStatus = async (videoTaskID, token) => {
         const chatBaseUrl = getChatBaseUrl()
         const account = accountManager.getAccountByToken(token)
         const proxyAgent = getProxyAgent(account)
-        const cookieHeader = buildUpstreamCookieHeader(token)
+        const cookieHeader = buildUpstreamCookieHeader(token, account)
 
         const requestConfig = {
             headers: {

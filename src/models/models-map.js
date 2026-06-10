@@ -1,6 +1,6 @@
 const axios = require('axios')
 const accountManager = require('../utils/account.js')
-const { getSsxmodItna, getSsxmodItna2 } = require('../utils/ssxmod-manager')
+const { getSsxmodItna, getSsxmodItna2, getCookieHeader } = require('../utils/ssxmod-manager')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../utils/proxy-helper')
 
 let cachedModels = null
@@ -27,7 +27,7 @@ const getLatestModels = async (force = false) => {
             'Authorization': `Bearer ${account ? account.token : ''}`,
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            ...(getSsxmodItna() && { 'Cookie': `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}` })
+            'Cookie': getCookieHeader(account)
         }
     }
 
