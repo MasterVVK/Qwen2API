@@ -213,17 +213,32 @@ cd /home/user/Qwen2API
 docker logs -f qwen2api
 docker logs --tail 50 qwen2api
 
-# рестарт qwen2api (после правки src/)
-docker compose -f docker/docker-compose.yml --project-name qwen2api restart qwen2api
+# ВАЖНО: всегда указывай --project-directory (корень проекта), иначе
+# относительные volumes (./src) и env_file (.env) отрезолвятся от docker/
+# и контейнер стартует с пустым /app/src.
+DC="docker compose -f docker/docker-compose.yml --project-directory /home/user/Qwen2API --project-name qwen2api"
+
+# рестарт qwen2api (после правки src/ — restart перечитывает примонтированный код)
+$DC restart qwen2api
+
+# применить изменения compose (healthcheck, новые сервисы) — recreate
+$DC up -d qwen2api
 
 # рестарт chrome-контейнеров (редко)
-docker compose -f docker/docker-compose.yml --project-name qwen2api restart chrome chrome-headless
+$DC restart chrome chrome-headless
 
-# bypass-daemon
-tail -f bypass/daemon.log
-bash bypass/restart-daemon.sh        # safe restart через PID file
+# bypass-daemon (под systemd — авто-старт после ребута, логи в journald)
+sudo systemctl status qwen2api-bypass
+sudo systemctl restart qwen2api-bypass
+journalctl -u qwen2api-bypass -f          # вместо tail -f daemon.log
+bash bypass/restart-daemon.sh             # обёртка: systemd, иначе nohup-fallback
 curl -sS http://192.168.0.58:9099/healthz
 curl -sS http://192.168.0.58:9099/status | jq .
+
+# установка systemd-юнита (однократно)
+sudo cp bypass/qwen2api-bypass.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen2api-bypass
 
 # captcha-статус и ручной refresh
 curl -sS -H "Authorization: Bearer sk-123456" \

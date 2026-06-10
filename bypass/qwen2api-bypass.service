@@ -1,0 +1,25 @@
+[Unit]
+Description=Qwen2API captcha-bypass daemon
+Documentation=https://github.com/MasterVVK/Qwen2API
+# Needs the docker engine up (the daemon drives chromium via `docker exec`).
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/Qwen2API/bypass
+# Optional overrides (OLLAMA_URL, QWEN_ADMIN_KEY, CHROME_CTR, …).
+# Leading "-" => file is optional; daemon falls back to its built-in defaults.
+EnvironmentFile=-/home/user/Qwen2API/bypass/daemon.env
+ExecStart=/usr/bin/node daemon.js
+Restart=always
+RestartSec=3
+# Logs go to journald (rotation handled by journald) — replaces the
+# unbounded nohup daemon.log. View with: journalctl -u qwen2api-bypass -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
