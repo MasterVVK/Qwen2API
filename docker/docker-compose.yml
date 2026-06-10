@@ -4,52 +4,60 @@ services:
     image: rfym21/qwen2api:latest
     restart: always
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./src:/app/src:ro
+      - ./public/captcha.html:/app/public/captcha.html:ro
+    env_file:
+      - .env
+
+  chrome:
+    container_name: qwen2api-chrome
+    image: lscr.io/linuxserver/chromium:latest
+    security_opt:
+      - seccomp:unconfined
     environment:
-      # 如果需要修改Docker暴露端口，请修改ports中的参数
-      # 示例(8080:3000) 则访问 http://localhost:8080
-      # To change the exposed port, modify the ports mapping above
-      # Example: (8080:3000) → http://localhost:8080
-      - SERVICE_PORT=3000
-      # API 密钥 (非必填)
-      # 如果需要使用多账户或使用内置账户，请填写
-      # API key (optional). Required for multi-account or built-in account usage
-      - API_KEY=sk-123456
-      # 监听地址(非必填)
-      # Listen address (optional)
-      - LISTEN_ADDRESS=
-      # PM2 多进程配置
-      # PM2进程数量: max(使用所有CPU核心), 数字(指定进程数量), 1(单进程)
-      # 注意: PM2集群模式下所有进程共用同一个端口
-      # PM2 multi-process: max (all cores), number, or 1 (single)
-      # Note: in cluster mode all processes share the same port
-      - PM2_INSTANCES=1
-      # PM2内存限制，超过此限制将自动重启进程
-      # PM2 memory limit — process restarts when exceeded
-      - PM2_MAX_MEMORY=1G
-      # 搜索信息展示模式
-      # table: 使用折叠块和表格展示
-      # text: 使用纯文本
-      # Search info display mode (table: collapsible tables / text: plain text)
-      - SEARCH_INFO_MODE=table
-      # 是否输出思考过程
-      # Whether to output the thinking process
-      - OUTPUT_THINK=true
-      # 简化模型映射 (true: 只返回基础模型, false: 返回完整模型列表)
-      # Simplified model mapping (true: base models only, false: full list)
-      - SIMPLE_MODEL_MAP=false
-      # redis 连接地址(如果使用redis模式，则必填，当redis使用tls时将redis://替换为rediss://)
-      # Redis URL (required for redis mode; use rediss:// for TLS)
-      - REDIS_URL=
-      # 数据保存模式
-      # Data save mode (none / file / redis)
-      - DATA_SAVE_MODE=none
-      # 账号(如果使用redis和file模式，则不需要填写)
-      # Accounts (not needed for redis/file mode)
-      - ACCOUNTS=
-      # 图片缓存
-      # Image cache mode (default: memory / file: disk)
-      - CACHE_MODE=default
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Moscow
+      - SELKIES_ENCODER=jpeg
+      - DRINODE=/dev/dri/renderD128
+      # No default proxy: each per-account BrowserContext (via CDP) sets its own proxyServer
+      # according to account.proxy. Accounts without proxy go through the container's host IP.
+      # --remote-debugging-port: enable CDP for the bypass daemon
+      # noVNC chromium runs in WINDOWED mode (for manual UI) — does NOT support
+      # Target.createBrowserContext in non-headless 148+. Bypass is delegated to
+      # a separate headless container (chrome-headless service below).
+      - CHROME_CLI=/config/.config/chromium --start-maximized about:blank
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"
+      - "109"
+    volumes:
+      - ./chrome-config:/config
+    ports:
+      - "192.168.0.58:3010:3000"
+      - "192.168.0.58:3011:3001"
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  # "Chrome runtime" — long-running container that provides chromium binary on demand.
+  # Daemon spawns short-lived chromium processes via `docker exec` per bypass, each
+  # with its own --user-data-dir, --proxy-server and --remote-debugging-port. This
+  # avoids the Target.createBrowserContext("Not allowed") security policy that
+  # current Chrome versions enforce on TCP CDP connections.
+  chrome-headless:
+    container_name: qwen2api-chrome-headless
+    image: zenika/alpine-chrome:latest
+    entrypoint: ["/bin/sh"]
+    command: ["-c", "while true; do sleep 3600; done"]
+    volumes:
+      - ./chrome-headless-data:/data
+    shm_size: "1gb"
+    # Host networking — per-bypass debug ports bind on container's loopback,
+    # daemon (also on host) reaches them via 127.0.0.1.
+    network_mode: host
+    restart: unless-stopped

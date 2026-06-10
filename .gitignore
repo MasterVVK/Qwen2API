@@ -11,3 +11,7 @@ pkg_dist/
 .idea
 /public/dist
 .vscode
+
+# Fork runtime data — chromium profile holds cookies, saved logins and a private SSL key
+chrome-config/
+chrome-headless-data/

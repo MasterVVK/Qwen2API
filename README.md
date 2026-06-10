@@ -12,6 +12,11 @@
 
 </div>
 
+> **Fork notice.** This is a fork of [Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API).
+> It adds an automated Aliyun-WAF captcha-bypass pipeline, per-account `x5sec`
+> handling, `503`/`Retry-After` on upstream blocks and truncated-thinking
+> detection. See [`NOTES.md`](NOTES.md) for fork-specific architecture and ops.
+
 ## 🛠️ 快速开始
 
 ### 项目说明
