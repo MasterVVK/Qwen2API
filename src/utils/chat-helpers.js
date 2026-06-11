@@ -223,8 +223,11 @@ const isThinkingEnabled = (model, enable_thinking, thinking_budget) => {
         thinking_config.thinking_enabled = true
     }
 
-    if (thinking_budget && Number(thinking_budget) !== Number.NaN && Number(thinking_budget) > 0 && Number(thinking_budget) < 38912) {
-        thinking_config.budget = Number(thinking_budget)
+    if (thinking_budget && Number.isFinite(Number(thinking_budget)) && Number(thinking_budget) > 0 && Number(thinking_budget) <= 81920) {
+        // FIX (forked): upstream feature_config field is `thinking_budget`, not `budget`.
+        // The original code wrote `.budget`, so client overrides were silently ignored
+        // and the default 81920 always won → thinking-mode over-reasoned past the answer.
+        thinking_config.thinking_budget = Number(thinking_budget)
     }
 
     return thinking_config

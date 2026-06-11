@@ -147,10 +147,18 @@ router.post('/captcha/_trigger', adminKeyVerify, async (req, res) => {
         const upstream = await axios.post(url, payload, config)
         const raw = typeof upstream.data === 'string' ? upstream.data : JSON.stringify(upstream.data)
         const m = raw.match(/"url":"([^"]+)"/)
+        // Variant 1 — JSON FAIL_SYS_USER_VALIDATE with an inline punish URL.
         if (raw.includes('FAIL_SYS_USER_VALIDATE') && m) {
             const captchaUrl = m[1].replace(/^https:\/\/chat\.qwen\.ai:443\//, 'https://chat.qwen.ai/').replace('//api', '/api')
-            return res.json({ captcha: true, url: captchaUrl, account: email, proxy: account.proxy || '(global)' })
+            logger.warn(`_trigger ${email}: WAF json-variant (url captured)`, 'CAPTCHA')
+            return res.json({ captcha: true, url: captchaUrl, variant: 'json', account: email, proxy: account.proxy || '(global)' })
         }
+        // Variant 2 — Aliyun WAF HTML interstitial page (no inline URL; captcha loads via JS).
+        if (raw.includes('aliyun_waf') || raw.includes('aliyunCaptcha')) {
+            logger.warn(`_trigger ${email}: WAF html-variant (client-side Aliyun captcha — not auto-solvable)`, 'CAPTCHA')
+            return res.json({ captcha: true, url: null, variant: 'html', account: email, proxy: account.proxy || '(global)' })
+        }
+        logger.info(`_trigger ${email}: no WAF (raw ${raw.length}B starts: ${raw.slice(0, 60).replace(/\s+/g, ' ')})`, 'CAPTCHA')
         return res.json({ captcha: false, account: email })
     } catch (err) {
         const status = err.response?.status || 0

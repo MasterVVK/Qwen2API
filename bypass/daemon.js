@@ -111,7 +111,7 @@ async function triggerCaptchaForAccount(email) {
     if (res.status !== 200) throw new Error(`_trigger HTTP ${res.status}: ${res.body.toString().slice(0, 200)}`)
     const j = JSON.parse(res.body.toString())
     if (!j.captcha) throw new Error('no-captcha (upstream healthy — refresh not needed)')
-    return j.url
+    return { url: j.url, variant: j.variant }   // url is null for the html-variant
 }
 
 async function getAccountInfo(email) {
@@ -242,7 +242,16 @@ async function runBypassForAccount(email, providedCaptchaUrl) {
             captchaUrl = providedCaptchaUrl
         } else {
             step = 'trigger'
-            captchaUrl = await triggerCaptchaForAccount(email)
+            const t = await triggerCaptchaForAccount(email)
+            captchaUrl = t.url
+        }
+        // html-variant: Aliyun escalated to its CLIENT-side captcha — no punish URL,
+        // widget loads from o.alicdn.com but its backend doesn't complete in our
+        // headless+proxy env, so the slider never renders. Not auto-solvable → fail
+        // fast (no chromium spawn). Happens under heavy WAF (China peak); off-peak the
+        // solvable server-rendered json-variant returns and the bypass works normally.
+        if (!captchaUrl) {
+            throw new Error('html-variant (Aliyun client captcha, no URL) — not auto-solvable; retry off-peak')
         }
 
         step = 'spawn-chromium'

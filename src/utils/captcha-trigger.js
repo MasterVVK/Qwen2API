@@ -114,6 +114,16 @@ function detectBlock(rawText) {
         }
         return { kind: 'slide-captcha', url }
     }
+    // Aliyun WAF HTML challenge page — a SECOND block format (besides the JSON
+    // FAIL_SYS_USER_VALIDATE variant above). Served as a full HTML captcha page
+    // (<!doctypehtml>…aliyun_waf_aa…#aliyunCaptcha-sliding-slider…). It has NO
+    // inline punish URL (captcha loads via JS), so we trigger the bypass with
+    // url=null — the daemon re-probes the upstream to obtain a solvable URL.
+    // Without this, the HTML page slipped through as block=none → empty content
+    // (Completion: 0) → upstream_mute → endless retries, no bypass, chapter fails.
+    if (rawText.includes('aliyun_waf') || rawText.includes('aliyunCaptcha')) {
+        return { kind: 'slide-captcha', url: null }
+    }
     if (rawText.includes('"code":"Bad_Request"') && rawText.includes('Internal error')) {
         return { kind: 'hard-block', url: null }
     }
