@@ -23,6 +23,7 @@ services:
   chrome:
     container_name: qwen2api-chrome
     image: lscr.io/linuxserver/chromium:latest
+    runtime: nvidia          # real RTX 3090 → genuine NVIDIA webgl fingerprint (vs llvmpipe software)
     security_opt:
       - seccomp:unconfined
     environment:
@@ -30,7 +31,8 @@ services:
       - PGID=1000
       - TZ=Europe/Moscow
       - SELKIES_ENCODER=jpeg
-      - DRINODE=/dev/dri/renderD128
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
       # No default proxy: each per-account BrowserContext (via CDP) sets its own proxyServer
       # according to account.proxy. Accounts without proxy go through the container's host IP.
       # --remote-debugging-port: enable CDP for the bypass daemon
@@ -48,6 +50,38 @@ services:
     ports:
       - "192.168.0.58:3010:3000"
       - "192.168.0.58:3011:3001"
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  # Dedicated, isolated linuxserver-chromium for the HTML-captcha (Aliyun FeiLin)
+  # solver. Same working X-input setup as the noVNC chrome (its own Xvfb :1 + openbox),
+  # real RTX 3090 GPU (genuine NVIDIA webgl fingerprint vs llvmpipe), separate profile.
+  # Does NOT touch the user's noVNC browser. CDP exposed via socat (9562→127.0.0.1:9561).
+  chrome-solver:
+    container_name: qwen2api-chrome-solver
+    image: lscr.io/linuxserver/chromium:latest
+    runtime: nvidia
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Moscow
+      - SELKIES_ENCODER=jpeg
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --proxy-server=http://192.168.0.61:8888 about:blank
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "44"
+      - "109"
+    volumes:
+      - ./chrome-solver-config:/config
+    ports:
+      - "127.0.0.1:9563:9563"   # CDP bridge (socat) — host reaches the solver's chromium
+      - "192.168.0.58:3012:3000"   # noVNC (http)  — manual view of the .61 logged-in session
+      - "192.168.0.58:3013:3001"   # noVNC (https)
     shm_size: "1gb"
     restart: unless-stopped
 

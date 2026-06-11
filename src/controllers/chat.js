@@ -2,6 +2,7 @@ const { isJson, generateUUID, nowEpochSeconds } = require('../utils/tools.js')
 const { detectTruncation } = require('../utils/truncation.js')
 const { createUsageObject } = require('../utils/precise-tokenizer.js')
 const { sendChatRequest } = require('../utils/request.js')
+const browserChannel = require('../utils/browser-channel-client.js')
 const { createToolCallStreamParser, parseToolCallsFromText } = require('../utils/tool-prompt.js')
 const accountManager = require('../utils/account.js')
 const config = require('../config/index.js')
@@ -688,6 +689,12 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
  */
 const handleChatCompletion = async (req, res) => {
     const { stream, model } = req.body
+
+    // WAF-bypass: route configured models through the UI-driving browser channel (no captcha)
+    const requestedModel = req.body.requestedModel || model
+    if (browserChannel.useBrowserChannel(requestedModel)) {
+        return browserChannel.delegate(req, res, requestedModel)
+    }
 
     const enable_thinking = req.enable_thinking
     const enable_web_search = req.enable_web_search

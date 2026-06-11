@@ -1,0 +1,29 @@
+[Unit]
+Description=Qwen2API browser-channel (UI-drive WAF bypass for translation/images)
+Documentation=https://github.com/MasterVVK/Qwen2API
+# Drives chromium in the qwen2api-chrome-solver container via `docker exec` + CDP.
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/Qwen2API/bypass
+Environment=BROWSER_CHANNEL_PORT=9100
+Environment=BROWSER_CHANNEL_HOST=0.0.0.0
+# Optional overrides (SOLVER_CTR, BC_EMAIL, QWEN_API_URL, QWEN_ADMIN_KEY, BC_RESP_TIMEOUT_MS).
+EnvironmentFile=-/home/user/Qwen2API/bypass/browser-channel.env
+ExecStart=/usr/bin/node browser-channel.js
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+# Install:
+#   sudo cp /home/user/Qwen2API/bypass/qwen2api-browser-channel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now qwen2api-browser-channel
+#   journalctl -u qwen2api-browser-channel -f

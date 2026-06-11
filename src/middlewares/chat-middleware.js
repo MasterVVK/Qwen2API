@@ -52,6 +52,8 @@ const processRequestBody = async (req, res, next) => {
 
     req.enable_web_search = body.chat_type === 'search' ? true : false
 
+    // keep the original requested model (before remap) for browser-channel routing
+    body.requestedModel = model
     // 处理 model 参数 : 模型
     body.model = await parserModel(model)
 
