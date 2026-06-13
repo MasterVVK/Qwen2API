@@ -17,7 +17,12 @@ const { detectGap } = require('./gap-detect')
 const CTR = process.env.SOLVER_CTR || 'qwen2api-chrome-solver'
 const DISP = ':1'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const xdo = cmd => { try { return execFileSync('docker', ['exec', '-e', `DISPLAY=${DISP}`, CTR, 'sh', '-c', cmd], { stdio: 'pipe' }).toString() } catch (e) { return '' } }
+// xdo is PER-CONTAINER: with an account pool, the captcha drag MUST target the container whose
+// session actually shows the captcha. (Bug fixed 2026-06-13: a single hardcoded container meant
+// every clone's captcha was dragged in solver-1's window → clone sliders never moved.) solve()
+// builds the right xdo from opts.ctr/opts.disp and threads it through; this default is fallback.
+const mkXdo = (ctr, disp) => cmd => { try { return execFileSync('docker', ['exec', '-e', `DISPLAY=${disp}`, ctr, 'sh', '-c', cmd], { stdio: 'pipe' }).toString() } catch (e) { return '' } }
+const xdo = mkXdo(CTR, DISP)
 
 // deterministic non-linear mouse-offset → piece-x calibration curve (Aliyun 300px UI)
 const CURVE = [[0, 0], [40, 9], [90, 36], [140, 80], [190, 143], [240, 223], [262, 248]]
@@ -46,7 +51,7 @@ async function isCaptcha(client) {
 // (.btn_slide / #nc_*_n1z) all the way right across the track (.nc_scale). Behaviourally
 // checked, so we use a real synced xdotool drag (ease-in-out + tremor). Lives in a same-origin
 // iframe; screen coords add the iframe page offset.
-async function solveNc(client, offset, log) {
+async function solveNc(client, offset, log, xdo) {
     const g = await client.Runtime.evaluate({ returnByValue: true, expression: `(()=>{for(const f of document.querySelectorAll('iframe')){try{const d=f.contentDocument;const h=d&&d.querySelector('.btn_slide,[id$=n1z]');const tr=d&&d.querySelector('.nc_scale,[id$=n1t]');if(h&&tr){const fr=f.getBoundingClientRect(),hb=h.getBoundingClientRect(),tb=tr.getBoundingClientRect();return{cx:Math.round(fr.x+hb.x+hb.width/2),cy:Math.round(fr.y+hb.y+hb.height/2),dist:Math.round(tb.width-hb.width-2)};}}catch(e){}}return null;})()` }).then(r => r.result.value)
     if (!g) { log('nc_ geometry not ready'); return false }
     const off = offset || { x: 0, y: 87 }
@@ -70,7 +75,7 @@ async function solveNc(client, offset, log) {
 // When the challenge has TIMED OUT it shows "Please click me to try again (error:...)" with
 // NO slider. Clicking it reloads a fresh challenge (and often clears the WAF outright). Returns
 // true if it clicked something (caller should then re-check / retry).
-async function clickTryAgain(client, offset, log) {
+async function clickTryAgain(client, offset, log, xdo) {
     const r = await client.Runtime.evaluate({ returnByValue: true, expression: `(()=>{for(const f of document.querySelectorAll('iframe')){try{const d=f.contentDocument;if(!d)continue;const e=[...d.querySelectorAll('a,span,div,button')].find(x=>/try again|click me|重试|刷新|点击/i.test(x.textContent)&&x.getBoundingClientRect().width>0&&x.getBoundingClientRect().width<400&&x.getBoundingClientRect().height<60);if(e){const fr=f.getBoundingClientRect(),b=e.getBoundingClientRect();return [Math.round(fr.x+b.x+b.width/2),Math.round(fr.y+b.y+b.height/2)];}}catch(e){}}return null;})()` }).then(r => r.result.value)
     if (!r) return false
     const off = offset || { x: 0, y: 87 }
@@ -83,12 +88,12 @@ async function clickTryAgain(client, offset, log) {
 // solve the captcha currently on the page once; returns true if it passed (captcha gone).
 // offset {x,y} = screen→css offset (pass the browser-channel's measured value to avoid a
 // probe that would land over the iframe and not fire the main document's mousemove).
-async function solveOnce(client, log = () => {}, offset = null) {
+async function solveOnce(client, log = () => {}, offset = null, xdo = mkXdo(CTR, DISP), tag = 'def') {
     // nc_ "slide to verify" variant? (different from the FeiLin puzzle below)
     const isNc = await client.Runtime.evaluate({ returnByValue: true, expression: `(()=>{for(const f of document.querySelectorAll('iframe')){try{if(f.contentDocument&&f.contentDocument.querySelector('.btn_slide,[id$=n1z]'))return true;}catch(e){}}return false;})()` }).then(r => r.result.value)
-    if (isNc) { log('variant: nc_ slide'); return solveNc(client, offset, log) }
+    if (isNc) { log('variant: nc_ slide'); return solveNc(client, offset, log, xdo) }
     // timed-out error state ("Please click me to try again")? reload for a fresh slider, then retry
-    if (await clickTryAgain(client, offset, log)) return false
+    if (await clickTryAgain(client, offset, log, xdo)) return false
     // wait for the slider + image (in whichever document)
     let ready = false
     for (let i = 0; i < 30; i++) { if (await evJSON(client, `return !!c.d.querySelector('#aliyunCaptcha-puzzle') && !!c.d.querySelector('#aliyunCaptcha-sliding-slider') && !!c.d.querySelector('#aliyunCaptcha-img');`)) { ready = true; break } await sleep(500) }
@@ -100,9 +105,10 @@ async function solveOnce(client, log = () => {}, offset = null) {
     const grab = sel => evAsync(client, `const el=c.d.querySelector('${sel}'); if(!el||!el.src) return null; if(/^data:.*,/.test(el.src)) return el.src.split(',')[1]; try{const r=await fetch(el.src); const u=new Uint8Array(await r.arrayBuffer()); let s=''; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s);}catch(e){return null;}`)
     const bgB64 = await grab('#aliyunCaptcha-img'), pcB64 = await grab('#aliyunCaptcha-puzzle')
     if (!bgB64 || !pcB64) { log('images not ready'); return false }
-    fs.writeFileSync('/tmp/cs-bg.png', Buffer.from(bgB64, 'base64'))
-    fs.writeFileSync('/tmp/cs-pc.png', Buffer.from(pcB64, 'base64'))
-    const det = detectGap('/tmp/cs-bg.png', '/tmp/cs-pc.png')
+    const bgPath = `/tmp/cs-bg-${tag}.png`, pcPath = `/tmp/cs-pc-${tag}.png`   // per-account: no clobber under concurrency
+    fs.writeFileSync(bgPath, Buffer.from(bgB64, 'base64'))
+    fs.writeFileSync(pcPath, Buffer.from(pcB64, 'base64'))
+    const det = detectGap(bgPath, pcPath)
     const gapX = det.gapX
     log(`gap=${gapX} (b=${det.methodA} t=${det.methodB})`)
 
@@ -160,10 +166,13 @@ async function solveOnce(client, log = () => {}, offset = null) {
 async function solve(client, opts = {}) {
     const maxTries = opts.maxTries || 20
     const log = opts.log || (() => {})
+    // target the CONTAINER whose session shows the captcha (opts.ctr/disp), not a fixed one
+    const xdo = mkXdo(opts.ctr || CTR, opts.disp || DISP)
+    const tag = (opts.ctr || 'def').replace(/[^a-zA-Z0-9]/g, '')
     for (let i = 0; i < maxTries; i++) {
         if (!(await isCaptcha(client))) return true
         log(`attempt ${i + 1}/${maxTries}`)
-        try { if (await solveOnce(client, log, opts.offset)) { log('PASSED'); return true } }
+        try { if (await solveOnce(client, log, opts.offset, xdo, tag)) { log('PASSED'); return true } }
         catch (e) { log('attempt error: ' + e.message) }
         await sleep(1500)
     }
