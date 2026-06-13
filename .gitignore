@@ -14,6 +14,10 @@ pkg_dist/
 
 # Fork runtime data — chromium profiles hold cookies, saved logins and a private SSL key
 chrome-config/
+chrome-config-*
 chrome-solver-config/
+chrome-solver-config-*
 chrome-headless-data/
 bypass/*.png
+# account-pool runtime config (per-account container/proxy/CDP map) — local to this host
+bypass/pool.json

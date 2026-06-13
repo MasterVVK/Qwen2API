@@ -76,8 +76,12 @@ async function withAccount(fn) {
         try { return await fn(a) }
         catch (e) {
             lastErr = e
+            // account-level failures → cool this account and try the next one. usage_limit is the
+            // daily quota (long cool); drive_failed/completion_stalled/cdp = a flaky or stuck
+            // container (short cool). content_filter/upstream_unreachable are NOT account-level —
+            // they propagate unchanged (content moderation, network outage).
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
-            if (e.message === 'CDP connect failed') { coolAccount(a, 5 * 60 * 1000, 'cdp_fail'); continue }
+            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
             throw e
         }
     }
@@ -230,9 +234,10 @@ async function sendPrompt(content) {
     for (let i = 0; i < 2; i++) {
         if (!(await clickSendBtn())) xdo('xdotool key Return')
         await sleep(2500)
-        if (await ev(`!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText)`).catch(() => false)) return
+        if (await ev(`!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText)`).catch(() => false)) return true
         log('send not submitted yet — retry')
     }
+    return false
 }
 async function readResponse(onDelta) {
     // Heavy chapter edits THINK for ~20 min (response stays empty), THEN stream a long answer.
@@ -281,10 +286,13 @@ async function runViaUI(opts, onDelta) {
     for (let attempt = 1; attempt <= MAX_CONTENT_RETRIES; attempt++) {
         await ensureNoCaptcha()
         await temporaryChat()
-        await selectModel(opts.model)
+        // selectModel/sendPrompt failures are ACCOUNT-level (flaky clone, UI not drivable) — throw
+        // drive_failed so withAccount() cools this account and fails over to the next one, instead
+        // of proceeding with the wrong model / a stuck composer and wedging the queue for 50 min.
+        if (!(await selectModel(opts.model))) throw new Error('drive_failed')
         await setThinkingMode(opts.thinking !== false)   // default Thinking; no-think models pass thinking:false
         await ensureNoCaptcha()
-        await sendPrompt(opts.content != null ? String(opts.content) : '')
+        if (!(await sendPrompt(opts.content != null ? String(opts.content) : ''))) throw new Error('drive_failed')
         await sleep(2500)
         await ensureNoCaptcha()           // in case sending somehow triggered it
         try {
