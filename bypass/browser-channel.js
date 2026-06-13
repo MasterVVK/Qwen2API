@@ -16,23 +16,78 @@
  * Env: SOLVER_CTR (default qwen2api-chrome-solver), BROWSER_CHANNEL_PORT (default 9100)
  */
 const http = require('http')
+const fs = require('fs')
+const path = require('path')
 const { execFileSync } = require('child_process')
 const CDP = require('chrome-remote-interface')
 const captcha = require('./captcha-solve')
 
-const CTR = process.env.SOLVER_CTR || 'qwen2api-chrome-solver'
-const DBG = 9561, CDP_PORT = 9563, DISP = ':1'
+const DEFAULT_CTR = process.env.SOLVER_CTR || 'qwen2api-chrome-solver'
 const LISTEN = Number(process.env.BROWSER_CHANNEL_PORT || 9100)
 const RESP_TIMEOUT_MS = Number(process.env.BC_RESP_TIMEOUT_MS || 50 * 60 * 1000) // qwen3.7-max thinks 10-15 min
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const log = (...a) => console.log(new Date().toISOString(), '[bc]', ...a)
 
-let client = null, off = null, queue = Promise.resolve()
+// ── account pool ──
+// Each account = its own chrome-solver container with a distinct logged-in qwen account, a
+// distinct host-side CDP port (socat → that container's chromium :9561) and its own proxy
+// egress. The HTTP request queue serializes everything, so instead of threading an account
+// object through every function we keep ONE set of "active" bindings (CTR/CDP_PORT/DBG/DISP/
+// client/off) and swap them per request via useAccount(). Pool is read from bypass/pool.json;
+// absent → a single account on the legacy 9563 port, i.e. identical to the old behaviour.
+function mkAccount(o) {
+    return {
+        name: o.name || o.ctr, ctr: o.ctr, cdpPort: Number(o.cdpPort) || 9563,
+        dbg: Number(o.dbg) || 9561, disp: o.disp || ':1', proxy: o.proxy || null,
+        client: null, off: null, coolUntil: 0, lastUsed: 0,
+    }
+}
+function loadPool() {
+    try {
+        const arr = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool.json'), 'utf8'))
+        if (Array.isArray(arr) && arr.length) return arr.map(mkAccount)
+    } catch (e) { /* no pool.json → single-account fallback */ }
+    return [mkAccount({ name: 'solver', ctr: DEFAULT_CTR, cdpPort: 9563 })]
+}
+const POOL = loadPool()
+let CUR = POOL[0]
+// active bindings mirror CUR; the rest of the file reads/mutates these directly
+let CTR = CUR.ctr, CDP_PORT = CUR.cdpPort, DBG = CUR.dbg, DISP = CUR.disp, client = CUR.client, off = CUR.off, queue = Promise.resolve()
+
+function useAccount(a) {
+    if (a !== CUR) { CUR.client = client; CUR.off = off; CUR = a; client = a.client; off = a.off }   // save outgoing, load incoming
+    CTR = a.ctr; CDP_PORT = a.cdpPort; DBG = a.dbg; DISP = a.disp
+}
+const available = a => Date.now() >= a.coolUntil
+function selectAccount() {
+    const pool = POOL.filter(available)
+    const from = pool.length ? pool : POOL.slice()        // all cooling → least-bad (oldest used)
+    from.sort((x, y) => x.lastUsed - y.lastUsed)           // round-robin by least-recently-used
+    const a = from[0]; a.lastUsed = Date.now(); return a
+}
+function coolAccount(a, ms, why) { a.coolUntil = Date.now() + ms; log(`account ${a.name} cooling ${Math.round(ms / 60000)}min (${why})`) }
+// run `fn(account)` on a selected account; on account-level failures (daily quota, dead CDP)
+// cool that account and retry on the next one. Content/network errors propagate unchanged.
+async function withAccount(fn) {
+    let lastErr
+    for (let i = 0; i < POOL.length; i++) {
+        const a = selectAccount(); useAccount(a)
+        if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
+        try { return await fn(a) }
+        catch (e) {
+            lastErr = e
+            if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
+            if (e.message === 'CDP connect failed') { coolAccount(a, 5 * 60 * 1000, 'cdp_fail'); continue }
+            throw e
+        }
+    }
+    throw lastErr
+}
 
 // ── infra ──
-function ensureSocat() {
-    try { execFileSync('docker', ['exec', '-u', 'root', CTR, 'sh', '-c', `which socat >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq socat xclip xdotool >/dev/null 2>&1)`], { stdio: 'pipe', timeout: 90000 }) } catch (e) {}
-    try { execFileSync('docker', ['exec', CTR, 'sh', '-c', `pgrep -f 'TCP-LISTEN:${CDP_PORT}' >/dev/null || setsid nohup socat TCP-LISTEN:${CDP_PORT},fork,reuseaddr TCP:127.0.0.1:${DBG} >/dev/null 2>&1 < /dev/null & sleep 1`], { stdio: 'pipe' }) } catch (e) {}
+function ensureSocat(ctr = CTR, cdpPort = CDP_PORT, dbg = DBG) {
+    try { execFileSync('docker', ['exec', '-u', 'root', ctr, 'sh', '-c', `which socat >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq socat xclip xdotool >/dev/null 2>&1)`], { stdio: 'pipe', timeout: 90000 }) } catch (e) {}
+    try { execFileSync('docker', ['exec', ctr, 'sh', '-c', `pgrep -f 'TCP-LISTEN:${cdpPort}' >/dev/null || setsid nohup socat TCP-LISTEN:${cdpPort},fork,reuseaddr TCP:127.0.0.1:${dbg} >/dev/null 2>&1 < /dev/null & sleep 1`], { stdio: 'pipe' }) } catch (e) {}
 }
 const xdo = cmd => { try { return execFileSync('docker', ['exec', '-e', `DISPLAY=${DISP}`, CTR, 'sh', '-c', cmd], { stdio: 'pipe' }).toString() } catch (e) { return '' } }
 const setClip = text => { try { execFileSync('docker', ['exec', '-i', '-e', `DISPLAY=${DISP}`, CTR, 'sh', '-c', 'xclip -selection clipboard'], { input: text, stdio: ['pipe', 'pipe', 'pipe'] }) } catch (e) {} }
@@ -312,7 +367,11 @@ async function generateImage(opts) {
 
 // ── HTTP ──
 const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url.startsWith('/health')) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true })) }
+    if (req.method === 'GET' && req.url.startsWith('/health')) {
+        const now = Date.now()
+        const accounts = POOL.map(a => ({ name: a.name, cdpPort: a.cdpPort, proxy: a.proxy, available: now >= a.coolUntil, coolForMin: a.coolUntil > now ? Math.round((a.coolUntil - now) / 60000) : 0 }))
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, pool: accounts.length, accounts }))
+    }
     if (req.method === 'POST' && req.url.startsWith('/complete')) {
         const chunks = []; req.on('data', d => chunks.push(d))
         req.on('end', () => {
@@ -323,7 +382,7 @@ const server = http.createServer((req, res) => {
                 if (wantStream) res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
                 const send = c => { if (wantStream && c) res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: { content: c }, finish_reason: null }] })}\n\n`) }
                 try {
-                    const text = await runViaUI(body, send)
+                    const text = await withAccount(() => runViaUI(body, send))
                     if (wantStream) { res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`); res.write('data: [DONE]\n\n'); res.end() }
                     else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] })) }
                     log(`done: ${text.length} chars`)
@@ -352,7 +411,7 @@ const server = http.createServer((req, res) => {
             let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
             queue = queue.then(async () => {
                 try {
-                    const img = await generateImage({ content: body.prompt || body.content, ratio: body.ratio })
+                    const img = await withAccount(() => generateImage({ content: body.prompt || body.content, ratio: body.ratio }))
                     res.writeHead(200, { 'Content-Type': 'application/json' })
                     res.end(JSON.stringify({ url: img ? img.src : '', width: img ? img.w : 0, height: img ? img.h : 0 }))
                     log(`image done: ${img ? `${img.w}x${img.h}` : 'none'}`)
@@ -371,8 +430,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(404); res.end('not found')
 })
 // bind all interfaces so the dockerised qwen2api proxy can reach us via the host gateway
-server.listen(LISTEN, process.env.BROWSER_CHANNEL_HOST || '0.0.0.0', () => log(`browser-channel (UI-drive) on :${LISTEN} — container ${CTR}`))
-// watchdog: keep the socat CDP bridge alive proactively (it gets wiped on container recreate /
-// can die) so the next request doesn't eat a reconnect. Safe — only touches socat, not the browser.
-setInterval(() => { try { ensureSocat() } catch (e) {} }, 120000)
+server.listen(LISTEN, process.env.BROWSER_CHANNEL_HOST || '0.0.0.0', () => log(`browser-channel (UI-drive) on :${LISTEN} — pool: ${POOL.map(a => `${a.name}@${a.cdpPort}`).join(', ')}`))
+// watchdog: keep the socat CDP bridge alive proactively on EVERY pool container (it gets wiped
+// on container recreate / can die) so the next request doesn't eat a reconnect. Safe — only
+// touches socat, not the browser.
+setInterval(() => { for (const a of POOL) { try { ensureSocat(a.ctr, a.cdpPort, a.dbg) } catch (e) {} } }, 120000)
 process.on('SIGTERM', () => { try { if (client) client.close() } catch (e) {} process.exit(0) })
