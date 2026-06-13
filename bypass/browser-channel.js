@@ -157,11 +157,25 @@ async function setThinkingMode(want) {
     log('thinking => failed to set', label)
     return false
 }
+// the composer send button (blue ↑). Clicking it submits whatever is in the composer — inline
+// text OR a file attachment — whereas Enter does NOT submit a file attachment with empty text.
+async function clickSendBtn() {
+    const r = await ev(`(()=>{const sb=[...document.querySelectorAll(".chat-prompt-send-button,[class*=send-button]")].find(e=>!/disabled/.test((e.className||'').toString())&&e.getBoundingClientRect().width>0);if(!sb)return null;const b=sb.getBoundingClientRect();return [Math.round(b.x+b.width/2),Math.round(b.y+b.height/2)];})()`)
+    if (!r) return false
+    await clickScreen(r[0] + off.x, r[1] + off.y); return true
+}
 async function sendPrompt(content) {
     setClip(content); await sleep(300)
     await clickCss('textarea'); await sleep(400)
-    xdo('xdotool key ctrl+v'); await sleep(800)
-    xdo('xdotool key Return')
+    // a paste larger than ~150KB is auto-converted by qwen into a FILE attachment ("Pasted_Text…txt")
+    // — give it time to attach, then submit via the send button (Enter won't submit a file).
+    xdo('xdotool key ctrl+v'); await sleep(1800)
+    for (let i = 0; i < 2; i++) {
+        if (!(await clickSendBtn())) xdo('xdotool key Return')
+        await sleep(2500)
+        if (await ev(`!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText)`).catch(() => false)) return
+        log('send not submitted yet — retry')
+    }
 }
 async function readResponse(onDelta) {
     // Heavy chapter edits THINK for ~20 min (response stays empty), THEN stream a long answer.
