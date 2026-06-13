@@ -25,12 +25,22 @@ const pool = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool.json'), 'utf8
 const clones = pool.filter(a => a.ctr && a.ctr !== PRIMARY)
 const suffixOf = ctr => ctr.replace(/^qwen2api-chrome-solver-?/, '') || ctr
 
+// proxy is sourced from data/data.json (the account's proxy, editable via the dashboard) keyed by
+// email — single source of truth. Falls back to the pool.json entry's proxy if the account has none.
+let dataProxy = {}
+try {
+    for (const ac of (JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'data.json'), 'utf8')).accounts || []))
+        if (ac.email && ac.proxy) dataProxy[ac.email] = ac.proxy
+} catch (e) { console.log('warn: could not read data/data.json proxies:', e.message) }
+const proxyFor = a => (a.email && dataProxy[a.email]) || a.proxy
+
 function service(a) {
     const suffix = suffixOf(a.ctr)
     const cfg = `chrome-solver-config-${suffix}`
     const idx = Number(a.cdpPort) - 9564                       // 0-based clone index (9564 = first clone)
     const nv1 = 3014 + idx * 2, nv2 = nv1 + 1                  // derived noVNC host ports
-    const proxyFlag = (a.proxy && a.proxy !== 'direct') ? ` --proxy-server=${a.proxy}` : ''
+    const proxy = proxyFor(a)
+    const proxyFlag = (proxy && proxy !== 'direct') ? ` --proxy-server=${proxy}` : ''
     return `  chrome-solver-${suffix}:
     container_name: ${a.ctr}
     image: lscr.io/linuxserver/chromium:latest
@@ -53,7 +63,7 @@ function service(a) {
     volumes:
       - ./${cfg}:/config
     ports:
-      - "127.0.0.1:${a.cdpPort}:${a.cdpPort}"   # CDP bridge (socat) — ${a.email || a.name} / ${a.proxy || 'direct'}
+      - "127.0.0.1:${a.cdpPort}:${a.cdpPort}"   # CDP bridge (socat) — ${a.email || a.name} / ${proxy || 'direct'}
       - "192.168.0.58:${nv1}:3000"   # noVNC http
       - "192.168.0.58:${nv2}:3001"   # noVNC https
     shm_size: "1gb"
@@ -64,7 +74,7 @@ function service(a) {
 const yaml = `# AUTO-GENERATED from bypass/pool.json by provision-pool.js — DO NOT EDIT BY HAND.\n# Edit pool.json then re-run: node bypass/provision-pool.js\nservices:\n${clones.map(service).join('\n\n')}\n`
 const outPath = path.join(ROOT, 'docker', 'docker-compose.pool.yml')
 fs.writeFileSync(outPath, yaml)
-console.log(`generated docker/docker-compose.pool.yml — ${clones.length} clones: ${clones.map(a => `${suffixOf(a.ctr)}(${a.proxy || 'direct'})`).join(', ')}`)
+console.log(`generated docker/docker-compose.pool.yml — ${clones.length} clones: ${clones.map(a => `${suffixOf(a.ctr)}(${proxyFor(a) || 'direct'})`).join(', ')}`)
 
 // 2) ensure profile dirs exist (owned by the container's PUID/PGID 1000)
 const fresh = []
