@@ -47,6 +47,8 @@ async function getClient() {
     return client
 }
 const ev = async expr => (await client.Runtime.evaluate({ returnByValue: true, expression: expr })).result.value
+// awaiting variant — for evals whose expression is an async IIFE returning a Promise
+const evA = async expr => (await client.Runtime.evaluate({ returnByValue: true, awaitPromise: true, expression: expr })).result.value
 
 // ── xdotool input (real keyboard/mouse) ──
 async function activateAndOffset() {
@@ -244,6 +246,70 @@ async function runViaUI(opts, onDelta) {
     throw lastErr
 }
 
+// ── image generation (Create Image mode) ──
+// the "+" button left of the composer opens the tools menu (Create Image / Create Video / …)
+async function clickPlus() {
+    const r = await ev(`(()=>{const t=document.querySelector("textarea");if(!t)return null;const tr=t.getBoundingClientRect();const b=[...document.querySelectorAll("button,[role=button],div")].filter(e=>{const r=e.getBoundingClientRect();return e.querySelector("svg")&&r.width>15&&r.width<55&&Math.abs(r.y+r.height/2-(tr.y+tr.height/2))<40&&r.x<tr.x;}).sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x)[0];if(!b)return null;const r=b.getBoundingClientRect();return [Math.round(r.x+r.width/2),Math.round(r.y+r.height/2)];})()`)
+    if (!r) return false
+    await clickScreen(r[0] + off.x, r[1] + off.y); await sleep(1300); return true
+}
+// aspect-ratio chip near the composer (shows e.g. "16:9"); click it then the target ratio
+async function setImageRatio(ratio) {
+    if (!ratio) return
+    const sel = await ev(`(()=>{const e=[...document.querySelectorAll("*")].filter(x=>x.children.length<=2&&/^\\s*(16:9|1:1|9:16|4:3|3:4)\\s*$/.test(x.textContent.trim())&&x.getBoundingClientRect().width>0&&x.getBoundingClientRect().y>350)[0];if(!e)return null;const b=e.getBoundingClientRect();return [Math.round(b.x+b.width/2),Math.round(b.y+b.height/2)];})()`)
+    if (!sel) { log('ratio selector not found'); return }
+    await clickScreen(sel[0] + off.x, sel[1] + off.y); await sleep(1000)
+    const ok = await clickByText(ratio); await sleep(800)
+    log('ratio =>', ok ? ratio : 'failed')
+}
+// poll for the generated image; return the FULL-RES original URL + true dimensions.
+// The generated image is served from cdn.qwenlm.ai/output/.../t2i/...png?key=<JWT>; the UI
+// appends &x-oss-process=image/resize,...,w_450 to shrink it for display. We strip that
+// param (keeping the ?key auth) to recover the original (e.g. 2688x1536 for 16:9), and load
+// the stripped URL in-page to read its real naturalWidth/Height. alicdn imgs are qwen's
+// preset-suggestion thumbnails, NOT our image — excluded.
+async function readImage(onDelta) {
+    const t0 = Date.now()
+    while (Date.now() - t0 < RESP_TIMEOUT_MS) {
+        await sleep(4000)
+        if (await captcha.isCaptcha(client)) await ensureNoCaptcha()
+        // daily image-generation quota on the logged-in account — distinct from a transient error
+        if (await ev(`/daily usage limit|usage limit\\. Please wait/i.test(document.body.innerText||"")`).catch(() => false)) throw new Error('usage_limit')
+        if (await ev(`/Oops! There was an issue|Content Security Warning|inappropriate content/i.test(document.body.innerText||"")`).catch(() => false)) throw new Error('qwen_error')
+        const r = await evA(`(async()=>{
+            const im=[...document.querySelectorAll("img")].filter(i=>/cdn\\.qwenlm\\.ai\\/output|\\/t2i\\//i.test(i.src||"")&&i.naturalWidth>50);
+            const i=im[im.length-1]; if(!i) return null;
+            const orig=i.src.split("x-oss-process")[0].replace(/[?&]$/,"");
+            const dim=await new Promise(res=>{const t=new Image();t.onload=()=>res([t.naturalWidth,t.naturalHeight]);t.onerror=()=>res(null);t.src=orig;setTimeout(()=>res(null),8000);});
+            return {src:orig, w:dim?dim[0]:i.naturalWidth, h:dim?dim[1]:i.naturalHeight};
+        })()`)
+        if (r) { log(`image: ${r.w}x${r.h} (full-res)`); return r }
+    }
+    return null
+}
+// open "+" menu and pick "Create Image" — robust against the menu not being rendered yet
+async function openCreateImage() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await clickPlus()
+        for (let i = 0; i < 8; i++) { if (await ev(`/Create Image/.test(document.body.innerText||"")`).catch(() => false)) break; await sleep(400) }
+        if (await clickByText('Create Image')) { await sleep(900); return true }
+        xdo('xdotool key Escape'); await sleep(400)
+    }
+    return false
+}
+async function generateImage(opts) {
+    await getClient()
+    await activateAndOffset()
+    await ensureNoCaptcha()
+    await temporaryChat()
+    if (!(await openCreateImage())) throw new Error('create_image_not_found')
+    await setImageRatio(opts.ratio)
+    await sendPrompt(opts.content != null ? String(opts.content) : '')
+    await sleep(2000)
+    await ensureNoCaptcha()
+    return readImage()
+}
+
 // ── HTTP ──
 const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/health')) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true })) }
@@ -275,6 +341,28 @@ const server = http.createServer((req, res) => {
                         if (wantStream) { res.write(`data: ${JSON.stringify({ error: { message: errMsg, type } })}\n\n`); res.end() }
                         else { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: errMsg, type } })) }
                     } catch (_) {}
+                }
+            }).catch(e => log('queue error', e.message))
+        })
+        return
+    }
+    if (req.method === 'POST' && req.url.startsWith('/image')) {
+        const chunks = []; req.on('data', d => chunks.push(d))
+        req.on('end', () => {
+            let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
+            queue = queue.then(async () => {
+                try {
+                    const img = await generateImage({ content: body.prompt || body.content, ratio: body.ratio })
+                    res.writeHead(200, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ url: img ? img.src : '', width: img ? img.w : 0, height: img ? img.h : 0 }))
+                    log(`image done: ${img ? `${img.w}x${img.h}` : 'none'}`)
+                } catch (e) {
+                    log('image error:', e.message)
+                    // daily quota on the account → 429 with a clear message; else 502
+                    const limited = e.message === 'usage_limit'
+                    const code = limited ? 429 : 502
+                    const errMsg = limited ? 'IMAGE_USAGE_LIMIT: qwen daily image-generation limit reached on this account' : e.message
+                    try { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: errMsg })) } catch (_) {}
                 }
             }).catch(e => log('queue error', e.message))
         })

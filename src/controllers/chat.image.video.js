@@ -1,5 +1,6 @@
 const axios = require('axios')
 const { logger } = require('../utils/logger.js')
+const browserChannel = require('../utils/browser-channel-client.js')
 const { setResponseHeaders } = require('./chat.js')
 const accountManager = require('../utils/account.js')
 const { sleep } = require('../utils/tools.js')
@@ -1575,6 +1576,18 @@ const handleOpenAIImagesGeneration = async (req, res) => {
             return sendOpenAIErrorResponse(res, {
                 status: 400,
                 error: 'prompt 是必填参数'
+            })
+        }
+
+        // WAF blocks server-side t2i during peak hours — delegate to the UI-drive browser channel,
+        // which drives qwen's "Create Image" and returns the full-res original (x-oss-process stripped).
+        if (browserChannel.useBrowserChannelImage(req.body.model)) {
+            const ratio = normalizeOpenAIImageVideoSize(req.body.size)
+            const img = await browserChannel.imageViaChannel({ prompt: req.body.prompt, ratio })
+            const imageData = await buildOpenAIImageResultItem(img.url, req.body.response_format)
+            return res.json({
+                created: Math.floor(Date.now() / 1000),
+                data: [imageData]
             })
         }
 
