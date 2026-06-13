@@ -20,39 +20,6 @@ services:
       retries: 3
       start_period: 20s
 
-  chrome:
-    container_name: qwen2api-chrome
-    image: lscr.io/linuxserver/chromium:latest
-    runtime: nvidia          # real RTX 3090 → genuine NVIDIA webgl fingerprint (vs llvmpipe software)
-    security_opt:
-      - seccomp:unconfined
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Moscow
-      - SELKIES_ENCODER=jpeg
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
-      # No default proxy: each per-account BrowserContext (via CDP) sets its own proxyServer
-      # according to account.proxy. Accounts without proxy go through the container's host IP.
-      # --remote-debugging-port: enable CDP for the bypass daemon
-      # noVNC chromium runs in WINDOWED mode (for manual UI) — does NOT support
-      # Target.createBrowserContext in non-headless 148+. Bypass is delegated to
-      # a separate headless container (chrome-headless service below).
-      - CHROME_CLI=/config/.config/chromium --start-maximized about:blank
-    devices:
-      - /dev/dri:/dev/dri
-    group_add:
-      - "44"
-      - "109"
-    volumes:
-      - ./chrome-config:/config
-    ports:
-      - "192.168.0.58:3010:3000"
-      - "192.168.0.58:3011:3001"
-    shm_size: "1gb"
-    restart: unless-stopped
-
   # Dedicated, isolated linuxserver-chromium for the HTML-captcha (Aliyun FeiLin)
   # solver. Same working X-input setup as the noVNC chrome (its own Xvfb :1 + openbox),
   # real RTX 3090 GPU (genuine NVIDIA webgl fingerprint vs llvmpipe), separate profile.
