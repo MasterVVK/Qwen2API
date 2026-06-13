@@ -1458,6 +1458,25 @@ const handleImageVideoCompletion = async (req, res) => {
     const downstreamStream = req.body.stream === true
     let keepAliveTimer = null
 
+    // Image gen via the chat endpoint (chat_type=t2i) hits server-side chat_id creation, which the
+    // WAF blocks ("生成 chat_id 失败"). Delegate to the UI-drive browser channel like /v1/images.
+    // The channel round-robins the account pool and returns the full-res original; we wrap the URL
+    // in the chat-completion content format the caller expects (![image](url)).
+    if (req.body.chat_type === 't2i' && browserChannel.useBrowserChannelImage(req.body.requestedModel || req.body.model)) {
+        try {
+            const msgs = req.body.messages || []
+            const last = msgs[msgs.length - 1]?.content
+            const prompt = typeof last === 'string' ? last : Array.isArray(last) ? last.map(p => (p && (p.text || p.content)) || '').join('') : ''
+            const ratio = normalizeOpenAIImageVideoSize(req.body.size)
+            const img = await browserChannel.imageViaChannel({ prompt, ratio })
+            return returnResponse(res, req.body.model, buildImageContent(img.url), downstreamStream)
+        } catch (error) {
+            logger.error('browser-channel t2i 失败', 'CHAT', '', error)
+            if (downstreamStream) return returnResponse(res, req.body.model, error?.message || 'image generation failed', true)
+            return sendUpstreamError(res, { status: error?.status || 500, error: error?.message || 'image generation failed' })
+        }
+    }
+
     try {
         if (downstreamStream && req.body.chat_type === 't2v') {
             setResponseHeaders(res, true)
