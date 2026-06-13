@@ -231,10 +231,12 @@ async function sendPrompt(content) {
     // a paste larger than ~150KB is auto-converted by qwen into a FILE attachment ("Pasted_Text…txt")
     // — give it time to attach, then submit via the send button (Enter won't submit a file).
     xdo('xdotool key ctrl+v'); await sleep(1800)
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
         if (!(await clickSendBtn())) xdo('xdotool key Return')
         await sleep(2500)
-        if (await ev(`!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText)`).catch(() => false)) return true
+        // submitted = generation running (stop button / "Thinking"), OR a response already appeared
+        // (fast answers finish before we look — was a false "not submitted" → drive_failed).
+        if (await ev(`(()=>{const gen=!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText||"");const resp=[...document.querySelectorAll(".response-message-content")].some(e=>e.innerText.trim().length>0);return gen||resp;})()`).catch(() => false)) return true
         log('send not submitted yet — retry')
     }
     return false
