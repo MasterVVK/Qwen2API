@@ -228,16 +228,18 @@ async function clickSendBtn() {
 async function sendPrompt(content) {
     setClip(content); await sleep(300)
     await clickCss('textarea'); await sleep(400)
-    // a paste larger than ~150KB is auto-converted by qwen into a FILE attachment ("Pasted_Text…txt")
-    // — give it time to attach, then submit via the send button (Enter won't submit a file).
-    xdo('xdotool key ctrl+v'); await sleep(1800)
-    for (let i = 0; i < 3; i++) {
+    // a paste >~150KB becomes a FILE attachment whose UPLOAD takes several seconds; the send button
+    // is a NO-OP until the upload finishes (clicking too early silently does nothing — this was the
+    // root of the 50-min stalls). So poll: each round (re)click send and check whether generation
+    // ACTUALLY started — the send button turned into a STOP button (icon-stop) or a response
+    // appeared. NOTE: never key off the body "Thinking" text — that's the Thinking/Fast toggle label,
+    // not a generation indicator. Enter won't submit a file, so we must click the send button.
+    xdo('xdotool key ctrl+v'); await sleep(1500)
+    for (let i = 0; i < 14; i++) {                 // up to ~35s for a big-file upload + submit
         if (!(await clickSendBtn())) xdo('xdotool key Return')
         await sleep(2500)
-        // submitted = generation running (stop button / "Thinking"), OR a response already appeared
-        // (fast answers finish before we look — was a false "not submitted" → drive_failed).
-        if (await ev(`(()=>{const gen=!!document.querySelector("[class*=stop-icon],[class*=stopButton]")||/Thinking/i.test(document.body.innerText||"");const resp=[...document.querySelectorAll(".response-message-content")].some(e=>e.innerText.trim().length>0);return gen||resp;})()`).catch(() => false)) return true
-        log('send not submitted yet — retry')
+        if (await ev(`(()=>{const stop=!!document.querySelector("[class*=icon-stop],[class*=stop-icon],[class*=stopButton]");const resp=[...document.querySelectorAll(".response-message-content")].some(e=>e.innerText.trim().length>0);return stop||resp;})()`).catch(() => false)) return true
+        if (i === 4 || i === 9) log('waiting for send to take (file still uploading?)')
     }
     return false
 }
@@ -251,10 +253,11 @@ async function readResponse(onDelta) {
     while (Date.now() - t0 < RESP_TIMEOUT_MS) {
         await sleep(3000)
         if (await captcha.isCaptcha(client)) { await ensureNoCaptcha() }
-        // "generating" = the composer's send-button is in STOP mode (present and NOT disabled);
-        // when the answer is done it reverts to ".send-button.disabled" (empty composer). This
-        // survives long thinking PAUSES (the stop button stays), unlike the stable-timer guess.
-        const st = await ev(`(()=>{const b=document.body.innerText||"";const m=[...document.querySelectorAll(".response-message-content")].map(e=>e.innerText.trim()).filter(Boolean);const sb=document.querySelector(".send-button,[class*=send-button]");const generating=(!!sb&&!/disabled/.test(sb.className||""))||!!document.querySelector("[class*=stop-icon],[class*=stopButton]");const err=/Oops! There was an issue|unexpected error occurred|Content Security Warning|inappropriate content|出错了|网络错误/i.test(b);const contentBlock=/Content Security Warning|inappropriate content|内容安全|违规内容/i.test(b);return {text:m[m.length-1]||"",generating,err,contentBlock};})()`)
+        // "generating" = the send button shows the STOP icon (icon-stop). When the answer is done it
+        // reverts to the SEND icon (icon-send). Keying off the icon — NOT "button not disabled" —
+        // is critical: a ready-to-send button (file attached, not submitted) is ALSO not-disabled,
+        // and mistaking that for generation caused 50-min stalls. The stop icon survives think pauses.
+        const st = await ev(`(()=>{const b=document.body.innerText||"";const m=[...document.querySelectorAll(".response-message-content")].map(e=>e.innerText.trim()).filter(Boolean);const generating=!!document.querySelector("[class*=icon-stop],[class*=stop-icon],[class*=stopButton]");const err=/Oops! There was an issue|unexpected error occurred|Content Security Warning|inappropriate content|出错了|网络错误/i.test(b);const contentBlock=/Content Security Warning|inappropriate content|内容安全|违规内容/i.test(b);return {text:m[m.length-1]||"",generating,err,contentBlock};})()`)
         const t = st.text
         if (t.length > last.length && onDelta) onDelta(t.slice(last.length))
         if (t === last && t.length > 0) stableCount++; else stableCount = 0
