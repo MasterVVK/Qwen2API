@@ -79,7 +79,9 @@ async function clickByText(text, opts = {}) {
 async function ensureNoCaptcha() {
     if (!(await captcha.isCaptcha(client))) return true
     log('WAF captcha appeared — auto-solving (retries)...')
-    return captcha.solve(client, { maxTries: 25, log: m => log('  captcha:', m) })
+    const ok = await captcha.solve(client, { maxTries: 25, offset: off, log: m => log('  captcha:', m) })
+    log(ok ? 'captcha cleared' : 'captcha NOT cleared after retries')
+    return ok
 }
 async function newChat() {
     const r = await ev(`(()=>{const b=[...document.querySelectorAll("button,a,div,span")].find(e=>/^\\s*New Chat\\s*$/.test(e.textContent)&&e.textContent.length<15&&e.getBoundingClientRect().width>0);if(!b)return null;const x=b.getBoundingClientRect();return [Math.round(x.x+x.width/2),Math.round(x.y+x.height/2)];})()`)
@@ -88,24 +90,34 @@ async function newChat() {
 // "Temporary Chat" = the right-most header icon: chat is NOT saved to history. Clicking it
 // opens a FRESH temporary chat each time (keeps the model). Retry until the URL confirms it.
 const isTemp = () => ev(`/temporary-chat=true/.test(location.href)`)
+// the page failed to LOAD — proxy/internet down (chrome error page / ERR_TUNNEL_CONNECTION_FAILED)
+const pageError = () => ev(`(()=>{const u=location.href||'';const b=(document.body&&document.body.innerText)||'';return /^chrome-error|^about:neterror/i.test(u)||/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|This site can.t be reached|can.t be reached/i.test(b);})()`)
 // Open a fresh "Temporary Chat" (not saved to history) by navigating the ADDRESS BAR with
 // real keyboard input (xdotool Ctrl+L → type URL → Enter). This is real navigation like a
 // human typing a URL — NOT CDP Page.navigate (which would trip the WAF). Captcha-free.
 async function temporaryChat() {
     // navigating to a fresh ?temporary-chat=true page also RESETS any sticky composer mode
     // (e.g. "Create Image" left over from a previous image request) back to plain text.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
         xdo(`xdotool windowactivate $(xdotool getmouselocation --shell 2>/dev/null | sed -n 's/WINDOW=//p') 2>/dev/null; true`)
         xdo('xdotool key ctrl+l'); await sleep(700)
         xdo('xdotool type --clearmodifiers --delay 20 "https://chat.qwen.ai/?temporary-chat=true"'); await sleep(500)
         xdo('xdotool key Return')
         for (let i = 0; i < 14; i++) { await sleep(900); if (await isTemp().catch(() => false)) break }
+        // proxy/internet down → keep re-navigating; it recovers the moment the connection returns
+        if (await pageError().catch(() => false)) {
+            log(`upstream unreachable (proxy/internet down) — attempt ${attempt + 1}, waiting for connection`)
+            await sleep(8000); continue
+        }
         if (await isTemp().catch(() => false)) {
             for (let i = 0; i < 20; i++) { if (await ev(`!!document.querySelector("textarea")`).catch(() => false)) break; await sleep(500) }
             log('temporary chat: on'); return true
         }
         log(`temporary chat attempt ${attempt + 1} → off, retrying`)
     }
+    // persistent connection failure → fail fast with a retriable error (the novel retries with
+    // backoff) instead of feeding a dead page into selectModel/sendPrompt and hanging.
+    if (await pageError().catch(() => false)) { log('upstream unreachable — proxy/internet down, bailing'); throw new Error('upstream_unreachable') }
     log('temporary chat: off (could not enter — translation may be unreliable)')
     return false
 }
@@ -156,21 +168,32 @@ async function readResponse(onDelta) {
     // So we can't finish on a timer or on "empty for a while" — wait for generation to actually
     // STOP (the composer's stop-button disappears) after having produced content. Fallbacks:
     // content unchanged for 30s, or the hard RESP_TIMEOUT_MS.
-    let last = '', stableCount = 0, sawGenerating = false
+    let last = '', stableCount = 0, sawGenerating = false, stallCount = 0
     const t0 = Date.now()
     while (Date.now() - t0 < RESP_TIMEOUT_MS) {
         await sleep(3000)
         if (await captcha.isCaptcha(client)) { await ensureNoCaptcha() }
-        const st = await ev(`(()=>{const m=[...document.querySelectorAll(".response-message-content")].map(e=>e.innerText.trim()).filter(Boolean);const generating=!!document.querySelector("[class*=stop-icon],[class*=stopButton],button[aria-label*='top']");const err=/Oops! There was an issue|unexpected error occurred|出错了|网络错误/i.test(document.body.innerText||"");return {text:m[m.length-1]||"",generating,err};})()`)
+        // "generating" = the composer's send-button is in STOP mode (present and NOT disabled);
+        // when the answer is done it reverts to ".send-button.disabled" (empty composer). This
+        // survives long thinking PAUSES (the stop button stays), unlike the stable-timer guess.
+        const st = await ev(`(()=>{const b=document.body.innerText||"";const m=[...document.querySelectorAll(".response-message-content")].map(e=>e.innerText.trim()).filter(Boolean);const sb=document.querySelector(".send-button,[class*=send-button]");const generating=(!!sb&&!/disabled/.test(sb.className||""))||!!document.querySelector("[class*=stop-icon],[class*=stopButton]");const err=/Oops! There was an issue|unexpected error occurred|Content Security Warning|inappropriate content|出错了|网络错误/i.test(b);const contentBlock=/Content Security Warning|inappropriate content|内容安全|违规内容/i.test(b);return {text:m[m.length-1]||"",generating,err,contentBlock};})()`)
         const t = st.text
         if (t.length > last.length && onDelta) onDelta(t.slice(last.length))
         if (t === last && t.length > 0) stableCount++; else stableCount = 0
         last = t
         if (st.generating) sawGenerating = true
-        // qwen backend error ("Oops! …") with no usable content → bail fast (don't wait the timeout)
-        if (st.err && !st.generating && t.length === 0) { log('qwen backend error (Oops) — bailing'); throw new Error('qwen_backend_error') }
+        // qwen error with no usable content → bail fast, REGARDLESS of generating (the send-button
+        // can get stuck in stop-mode). Distinguish a content-moderation block from a generic Oops.
+        if (st.err && t.length === 0) {
+            if (st.contentBlock) { log('content blocked by qwen moderation'); throw new Error('content_filter') }
+            log('qwen error (Oops) — bailing'); throw new Error('qwen_error')
+        }
+        // completion never started / didn't resume after a captcha: no content AND not generating
+        // for ~150s → don't sit on the 50-min timeout, bail so the novel retries fast
+        if (t.length === 0 && !st.generating) stallCount++; else stallCount = 0
+        if (stallCount >= 50) { log('no generation/response 150s after send — stalled, bailing'); throw new Error('completion_stalled') }
         // finished = produced content AND (generation stopped after we saw it run, OR stable 30s)
-        if (t.length > 0 && ((!st.generating && sawGenerating) || stableCount >= 10)) break
+        if (t.length > 0 && ((!st.generating && sawGenerating) || stableCount >= 20)) break
     }
     return last
 }
@@ -178,15 +201,33 @@ async function readResponse(onDelta) {
 async function runViaUI(opts, onDelta) {
     await getClient()
     await activateAndOffset()
-    await ensureNoCaptcha()
-    await temporaryChat()
-    await selectModel(opts.model)
-    await setThinkingMode(opts.thinking !== false)   // default Thinking; no-think models pass thinking:false
-    await ensureNoCaptcha()
-    await sendPrompt(opts.content != null ? String(opts.content) : '')
-    await sleep(2500)
-    await ensureNoCaptcha()           // in case sending somehow triggered it
-    return readResponse(onDelta)
+    // qwen content moderation is NON-DETERMINISTIC (same input passes/blocks at random), so a
+    // content_filter is retried internally a few times; only a PERSISTENT block propagates up as
+    // content_filter → the proxy turns it into a PROHIBITED_CONTENT error → the novel skips the
+    // chapter. No content is streamed before content_filter (it throws at 0 chars), so retry is clean.
+    const MAX_CONTENT_RETRIES = 3
+    let lastErr
+    for (let attempt = 1; attempt <= MAX_CONTENT_RETRIES; attempt++) {
+        await ensureNoCaptcha()
+        await temporaryChat()
+        await selectModel(opts.model)
+        await setThinkingMode(opts.thinking !== false)   // default Thinking; no-think models pass thinking:false
+        await ensureNoCaptcha()
+        await sendPrompt(opts.content != null ? String(opts.content) : '')
+        await sleep(2500)
+        await ensureNoCaptcha()           // in case sending somehow triggered it
+        try {
+            return await readResponse(onDelta)
+        } catch (e) {
+            lastErr = e
+            if (e.message === 'content_filter' && attempt < MAX_CONTENT_RETRIES) {
+                log(`content blocked — internal retry ${attempt + 1}/${MAX_CONTENT_RETRIES} (moderation is non-deterministic)`)
+                continue
+            }
+            throw e
+        }
+    }
+    throw lastErr
 }
 
 // ── HTTP ──
@@ -208,7 +249,18 @@ const server = http.createServer((req, res) => {
                     log(`done: ${text.length} chars`)
                 } catch (e) {
                     log('error:', e.message)
-                    try { if (wantStream) { res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`); res.end() } else { res.writeHead(500); res.end(e.message) } } catch (_) {}
+                    // persistent content block → PROHIBITED_CONTENT (400) so the novel SKIPS the chapter;
+                    // proxy/internet down → 503 so the novel RETRIES with backoff; else generic 502.
+                    const blocked = e.message === 'content_filter'
+                    const unreachable = e.message === 'upstream_unreachable'
+                    const code = blocked ? 400 : unreachable ? 503 : 502
+                    const errMsg = blocked ? 'PROHIBITED_CONTENT: qwen content moderation blocked this input after retries'
+                        : unreachable ? 'upstream unreachable: proxy/internet down (retry)' : e.message
+                    const type = blocked ? 'content_filter' : unreachable ? 'service_unavailable' : 'browser_channel_error'
+                    try {
+                        if (wantStream) { res.write(`data: ${JSON.stringify({ error: { message: errMsg, type } })}\n\n`); res.end() }
+                        else { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: errMsg, type } })) }
+                    } catch (_) {}
                 }
             }).catch(e => log('queue error', e.message))
         })
@@ -218,4 +270,7 @@ const server = http.createServer((req, res) => {
 })
 // bind all interfaces so the dockerised qwen2api proxy can reach us via the host gateway
 server.listen(LISTEN, process.env.BROWSER_CHANNEL_HOST || '0.0.0.0', () => log(`browser-channel (UI-drive) on :${LISTEN} — container ${CTR}`))
+// watchdog: keep the socat CDP bridge alive proactively (it gets wiped on container recreate /
+// can die) so the next request doesn't eat a reconnect. Safe — only touches socat, not the browser.
+setInterval(() => { try { ensureSocat() } catch (e) {} }, 120000)
 process.on('SIGTERM', () => { try { if (client) client.close() } catch (e) {} process.exit(0) })
