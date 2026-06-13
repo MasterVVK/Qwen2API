@@ -31,7 +31,7 @@ const log = (...a) => console.log(new Date().toISOString(), '[bc]', ...a)
 function mkAccount(o) {
     return {
         name: o.name || o.ctr, ctr: o.ctr, cdpPort: Number(o.cdpPort) || 9563,
-        dbg: Number(o.dbg) || 9561, disp: o.disp || ':1', proxy: o.proxy || null,
+        dbg: Number(o.dbg) || 9561, disp: o.disp || ':1', proxy: o.proxy || null, email: o.email || null,
         client: null, off: null, coolUntil: 0, coolReason: null, lastUsed: 0, busy: false, driver: null,
         ok: 0, fail: 0, lastError: null,   // status counters (surfaced in /health)
     }
@@ -357,13 +357,17 @@ const server = http.createServer((req, res) => {
             let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
             const wantStream = body.stream !== false
             const id = 'chatcmpl-' + Math.random().toString(36).slice(2, 10), created = Math.floor(Date.now() / 1000)
-            if (wantStream) res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
-            const send = c => { if (wantStream && c) res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: { content: c }, finish_reason: null }] })}\n\n`) }
+            // report which pool account handled this so the proxy can attribute token usage to it.
+            // writeHead is LAZY (set once, on first stream chunk or at the end) so the x-pool-email
+            // header carries the account picked inside withAccount() — for stream and non-stream alike.
+            let usedEmail = '', headDone = false
+            const streamHead = () => { if (!headDone) { headDone = true; res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'x-pool-email': usedEmail }) } }
+            const send = c => { if (wantStream) { streamHead(); if (c) res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: { content: c }, finish_reason: null }] })}\n\n`) } }
             try {
-                const text = await withAccount((drv) => drv.runViaUI(body, send))
-                if (wantStream) { res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`); res.write('data: [DONE]\n\n'); res.end() }
-                else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] })) }
-                log(`done: ${text.length} chars`)
+                const text = await withAccount((drv, a) => { usedEmail = a.email || ''; return drv.runViaUI(body, send) })
+                if (wantStream) { streamHead(); res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`); res.write('data: [DONE]\n\n'); res.end() }
+                else { res.writeHead(200, { 'Content-Type': 'application/json', 'x-pool-email': usedEmail }); res.end(JSON.stringify({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] })) }
+                log(`done: ${text.length} chars [${usedEmail || '?'}]`)
             } catch (e) {
                 log('error:', e.message)
                 const blocked = e.message === 'content_filter'
@@ -373,7 +377,7 @@ const server = http.createServer((req, res) => {
                     : unreachable ? 'upstream unreachable: proxy/internet down (retry)' : e.message
                 const type = blocked ? 'content_filter' : unreachable ? 'service_unavailable' : 'browser_channel_error'
                 try {
-                    if (wantStream) { res.write(`data: ${JSON.stringify({ error: { message: errMsg, type } })}\n\n`); res.end() }
+                    if (wantStream) { streamHead(); res.write(`data: ${JSON.stringify({ error: { message: errMsg, type } })}\n\n`); res.end() }
                     else { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: errMsg, type } })) }
                 } catch (_) {}
             }

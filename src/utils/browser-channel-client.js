@@ -11,6 +11,25 @@
  */
 const http = require('http')
 const { logger } = require('./logger')
+const accountManager = require('./account.js')
+const { createUsageObject } = require('./precise-tokenizer.js')
+
+// pull the assistant text out of the channel's response so we can estimate tokens for stats.
+// stream → concatenate SSE delta.content; non-stream → choices[0].message.content.
+function extractAssistantText(body, isStream) {
+    try {
+        if (isStream) {
+            let out = ''
+            for (const line of body.split('\n')) {
+                const m = line.match(/^data:\s?(.+)$/)
+                if (!m || m[1].trim() === '[DONE]') continue
+                try { const c = JSON.parse(m[1])?.choices?.[0]?.delta?.content; if (c) out += c } catch (_) {}
+            }
+            return out
+        }
+        return JSON.parse(body)?.choices?.[0]?.message?.content || ''
+    } catch (_) { return '' }
+}
 
 const BC_URL = process.env.BROWSER_CHANNEL_URL || 'http://172.25.0.1:9100'
 const BC_MODELS = (process.env.BROWSER_CHANNEL_MODELS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
@@ -81,9 +100,25 @@ function delegate(req, res, model) {
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
         timeout: 25 * 60 * 1000,                 // qwen3.7-max thinks 10-15 min
     }, up => {
+        // the channel tells us which pool account handled this (x-pool-email); browser traffic
+        // skips the axios path, so attribute estimated token usage here to keep per-account stats
+        // (the dashboard) accurate. Tee the response so we can both relay it AND read its text.
+        const email = up.headers['x-pool-email'] || ''
         res.writeHead(up.statusCode || 200, { 'Content-Type': up.headers['content-type'] || (stream ? 'text/event-stream' : 'application/json') })
-        up.pipe(res)
-        up.on('end', () => logger.success(`browser-channel done for ${model}`, 'BROWSER'))
+        const bufs = []
+        up.on('data', c => { bufs.push(c); res.write(c) })
+        up.on('end', () => {
+            try { res.end() } catch (_) {}
+            logger.success(`browser-channel done for ${model}`, 'BROWSER')
+            try {
+                if (email && (up.statusCode || 200) < 400) {
+                    const outText = extractAssistantText(Buffer.concat(bufs).toString('utf8'), !!stream)
+                    const usage = createUsageObject(req.body.messages || content, outText, null)
+                    accountManager.accumulateStats(email, 'chat', { input: Number(usage.prompt_tokens) || 0, output: Number(usage.completion_tokens) || 0 })
+                    logger.info(`usage → ${email}: ${usage.prompt_tokens}+${usage.completion_tokens} tok (browser)`, 'BROWSER')
+                }
+            } catch (e) { logger.error(`browser-channel usage attribute failed: ${e.message}`, 'BROWSER') }
+        })
     })
     upstream.on('error', e => { logger.error(`browser-channel error: ${e.message}`, 'BROWSER'); if (!res.headersSent) res.status(502).json({ error: { type: 'browser_channel_error', message: e.message } }); else try { res.end() } catch (_) {} })
     upstream.on('timeout', () => { upstream.destroy(new Error('browser-channel timeout')) })
