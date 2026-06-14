@@ -4,7 +4,7 @@
 
 # 🚀 Qwen-Proxy
 
-[![Version](https://img.shields.io/badge/version-2026.04.29.23.45-blue.svg)](https://github.com/Rfym21/Qwen2API)
+[![Version](https://img.shields.io/badge/version-2026.05.26.23.30-blue.svg)](https://github.com/MasterVVK/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
 
@@ -12,10 +12,45 @@
 
 </div>
 
-> **Fork notice.** This is a fork of [Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API).
-> It adds an automated Aliyun-WAF captcha-bypass pipeline, per-account `x5sec`
-> handling, `503`/`Retry-After` on upstream blocks and truncated-thinking
-> detection. See [`NOTES.md`](NOTES.md) for fork-specific architecture and ops.
+> **Fork notice.** 这是 [Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API) 的一个分支
+> （[MasterVVK/Qwen2API](https://github.com/MasterVVK/Qwen2API)），面向**小规模账号池的 7×24 稳定运行**，
+> 增加了浏览器通道（browser-channel）UI 驱动绕过 WAF、账号池 + 按账号代理隔离与故障转移、
+> 阿里云验证码自动求解流水线，以及把被截断的 thinking 标记为 `finish_reason="length"`（而非伪 `stop`）。
+> 详见下方「分支架构」与 [`NOTES.md`](NOTES.md)。
+
+## 🔱 分支架构（本分支新增）
+
+在上游基础上，本分支增加了一层用于对抗阿里云 WAF、面向无人值守长期运行的能力：
+
+- **浏览器通道 / UI 驱动绕过 WAF** — `bypass/browser-channel.js`、`src/utils/browser-channel-client.js`。
+  在 `BROWSER_CHANNEL_MODELS` 中列出的模型，会通过真实 Chrome（经 CDP 驱动）以前端方式提交，
+  而非服务端 API 调用，因此 WAF 不会拦截；响应以标准 OpenAI SSE 回传。
+  当 thinking 被截断（`<think>` 未闭合、没有最终答案）时，返回 `finish_reason:"length"` +
+  `incomplete_details`，而不是伪装成功的 `stop`。图片生成也可走该通道（`BROWSER_CHANNEL_IMAGE`）。
+- **账号池 + 按账号代理** — `bypass/pool.json`、`data/data.json`、`src/utils/account.js`。
+  每个账号一个容器、独立出站代理、自动故障转移、按账号统计 token（经 `x-pool-email` 归属）。
+- **阿里云验证码流水线** — `bypass/daemon.js`、`bypass/captcha-solve.js`、`src/routes/captcha.js`。
+  检测到 WAF 拦截（`FAIL_SYS_USER_VALIDATE`）→ 向客户端返回 `503` + `Retry-After`；
+  后台守护进程自动拖动滑块（失败时回退到 Ollama 视觉模型识别缺口）并热替换 `x5sec` Cookie。
+- **thinking_budget 修复** — `src/utils/chat-helpers.js`：写入正确的 `thinking_budget` feature_config 字段。
+
+**分支相关环境变量（占位示例）：**
+
+```bash
+BROWSER_CHANNEL_URL=http://<host-gateway>:9100     # 容器内访问宿主的网关地址
+BROWSER_CHANNEL_MODELS=model-a,model-b             # 走浏览器通道的模型 ID（逗号分隔）
+BROWSER_CHANNEL_IMAGE=true                         # 图片生成也走通道
+BROWSER_CHANNEL_IMAGE_MODELS=image-model
+BC_RESP_TIMEOUT_MS=3000000                          # 通道单次响应超时（重 thinking 用）
+CAPTCHA_DAEMON_URL=http://<host>:9099               # 验证码守护进程
+CHROME_CTR=qwen2api-chrome-headless                 # 守护进程使用的无头 Chrome 容器
+OLLAMA_URL=http://<host>:11434                       # 滑块缺口识别的视觉模型回退
+OLLAMA_MODEL=qwen2.5vl:7b
+```
+
+**运行拓扑：** `qwen2api`（Node）+ 一组 `chrome-solver` 容器（每账号一个，GPU 支持，各自独立代理与 CDP 端口）
++ 一个 `chrome-headless` 容器 + 宿主上的验证码守护进程。参见 `docker/docker-compose.yml` 与
+systemd 单元 `bypass/qwen2api-browser-channel.service`，完整运维说明见 [`NOTES.md`](NOTES.md)。
 
 ## 🛠️ 快速开始
 
@@ -35,6 +70,7 @@ Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换
 - 支持 CLI 端点，提供 256K 上下文和工具调用能力
 - 提供 Web 管理界面，方便配置和监控
 - 批量添加账号支持实时进度展示，可在系统设置中调整登录并发数
+- **（本分支）** 浏览器通道 UI 驱动绕过 WAF、账号池 + 按账号代理隔离与故障转移、阿里云验证码自动求解（详见「分支架构」）
 
 ### 🌐 账号级代理 / Per-account proxy
 

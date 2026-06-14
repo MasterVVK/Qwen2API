@@ -4,13 +4,61 @@
 
 # 🚀 Qwen-Proxy
 
-[![Version](https://img.shields.io/badge/version-2026.04.29.23.45-blue.svg)](https://github.com/Rfym21/Qwen2API)
+[![Version](https://img.shields.io/badge/version-2026.05.26.23.30-blue.svg)](https://github.com/MasterVVK/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
 
 [🔗 Join Telegram Group](https://t.me/nodejs_project) | [📖 Documentation](#api-documentation) | [🐳 Docker Deployment](#docker-deployment)
 
 </div>
+
+> **Fork notice.** This is a fork of [Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API)
+> ([MasterVVK/Qwen2API](https://github.com/MasterVVK/Qwen2API)), hardened for **24/7
+> operation on a small account pool**. It adds a browser-channel UI-drive WAF bypass, an
+> account pool with per-account proxy isolation & failover, an Aliyun captcha auto-solver,
+> and signals truncated thinking as `finish_reason="length"` (instead of a false `stop`).
+> See "Fork architecture" below and [`NOTES.md`](NOTES.md).
+
+## 🔱 Fork architecture (added by this fork)
+
+On top of upstream, this fork adds a layer for surviving the Aliyun WAF in unattended,
+long-running operation:
+
+- **Browser-channel (UI-drive WAF bypass)** — `bypass/browser-channel.js`,
+  `src/utils/browser-channel-client.js`. Models listed in `BROWSER_CHANNEL_MODELS` are
+  driven through a real Chrome (via CDP) as front-end submissions instead of server-side
+  API calls, so the WAF never challenges them; responses relay back as standard OpenAI SSE.
+  Truncated thinking (unclosed `<think>`, no final answer) is returned as
+  `finish_reason:"length"` + `incomplete_details` rather than a false `stop`. Image
+  generation can also route through the channel (`BROWSER_CHANNEL_IMAGE`).
+- **Account pool + per-account proxy** — `bypass/pool.json`, `data/data.json`,
+  `src/utils/account.js`. One container per account, isolated outbound proxy, automatic
+  failover, per-account token accounting (attributed via the `x-pool-email` header).
+- **Aliyun captcha pipeline** — `bypass/daemon.js`, `bypass/captcha-solve.js`,
+  `src/routes/captcha.js`. A WAF block (`FAIL_SYS_USER_VALIDATE`) → the client gets `503`
+  + `Retry-After`; a background daemon auto-drags the slider (falling back to an Ollama
+  vision model for gap detection) and hot-swaps the `x5sec` cookie.
+- **thinking_budget fix** — `src/utils/chat-helpers.js`: writes the correct
+  `thinking_budget` feature_config field.
+
+**Fork environment variables (placeholder values):**
+
+```bash
+BROWSER_CHANNEL_URL=http://<host-gateway>:9100     # host gateway, as seen from inside the container
+BROWSER_CHANNEL_MODELS=model-a,model-b             # model IDs to route via the browser (comma list)
+BROWSER_CHANNEL_IMAGE=true                         # also route image generation via the channel
+BROWSER_CHANNEL_IMAGE_MODELS=image-model
+BC_RESP_TIMEOUT_MS=3000000                          # per-response timeout for the channel (heavy thinking)
+CAPTCHA_DAEMON_URL=http://<host>:9099               # captcha daemon
+CHROME_CTR=qwen2api-chrome-headless                 # headless Chrome container used by the daemon
+OLLAMA_URL=http://<host>:11434                       # vision-model fallback for slider-gap detection
+OLLAMA_MODEL=qwen2.5vl:7b
+```
+
+**Runtime topology:** `qwen2api` (Node) + a pool of `chrome-solver` containers (one per
+account, GPU-backed, each with its own proxy + CDP port) + a `chrome-headless` container +
+a host-side captcha daemon. See `docker/docker-compose.yml` and the systemd unit
+`bypass/qwen2api-browser-channel.service`; full ops notes in [`NOTES.md`](NOTES.md).
 
 ## 🛠️ Quick Start
 
@@ -30,6 +78,7 @@ Qwen-Proxy is a proxy service that converts `https://chat.qwen.ai` and `Qwen Cod
 - Supports CLI endpoints with 256K context and tool calling capabilities
 - Provides web management interface for easy configuration and monitoring
 - Batch account addition supports real-time progress display, adjustable login concurrency in system settings
+- **(This fork)** Browser-channel UI-drive WAF bypass, account pool with per-account proxy isolation & failover, and Aliyun captcha auto-solving (see "Fork architecture")
 
 ### 🌐 Per-Account Proxy
 

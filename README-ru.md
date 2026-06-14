@@ -4,13 +4,59 @@
 
 # 🚀 Qwen-Proxy
 
-[![Version](https://img.shields.io/badge/version-2026.04.06.12.30-blue.svg)](https://github.com/Rfym21/Qwen2API)
+[![Version](https://img.shields.io/badge/version-2026.05.26.23.30-blue.svg)](https://github.com/MasterVVK/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
 
 [🔗 Присоединиться к чату](https://t.me/nodejs_project) | [📖 Документация](#api-документация) | [🐳 Развертывание Docker](#развертывание-docker)
 
 </div>
+
+> **О форке.** Это форк [Rfym21/Qwen2API](https://github.com/Rfym21/Qwen2API)
+> ([MasterVVK/Qwen2API](https://github.com/MasterVVK/Qwen2API)), заточенный под **круглосуточную
+> работу на небольшом пуле аккаунтов**. Добавлены: браузер-канал (UI-драйв обход WAF), пул аккаунтов
+> с по-аккаунтной изоляцией прокси и переключением при сбое, авто-решатель капчи Aliyun, а усечённый
+> thinking отдаётся как `finish_reason="length"` (а не ложный `stop`). См. раздел «Архитектура форка»
+> ниже и [`NOTES.md`](NOTES.md).
+
+## 🔱 Архитектура форка (что добавлено)
+
+Поверх апстрима форк добавляет слой для устойчивости к WAF Aliyun при длительной беспилотной работе:
+
+- **Браузер-канал (UI-драйв обход WAF)** — `bypass/browser-channel.js`,
+  `src/utils/browser-channel-client.js`. Модели из `BROWSER_CHANNEL_MODELS` отправляются через
+  реальный Chrome (по CDP) как фронтенд-запросы, а не серверным API-вызовом, поэтому WAF их не
+  челленджит; ответ возвращается стандартным OpenAI SSE. Усечённый thinking (незакрытый `<think>`,
+  без финального ответа) отдаётся как `finish_reason:"length"` + `incomplete_details`, а не ложным
+  `stop`. Генерация картинок тоже может идти через канал (`BROWSER_CHANNEL_IMAGE`).
+- **Пул аккаунтов + по-аккаунтные прокси** — `bypass/pool.json`, `data/data.json`,
+  `src/utils/account.js`. Контейнер на аккаунт, изолированный исходящий прокси, авто-переключение
+  при сбое, по-аккаунтный учёт токенов (через заголовок `x-pool-email`).
+- **Пайплайн капчи Aliyun** — `bypass/daemon.js`, `bypass/captcha-solve.js`,
+  `src/routes/captcha.js`. Детект блока WAF (`FAIL_SYS_USER_VALIDATE`) → клиенту `503` +
+  `Retry-After`; фоновый демон авто-перетаскивает слайдер (с фоллбэком на vision-модель Ollama для
+  поиска выреза) и горячо подменяет cookie `x5sec`.
+- **Фикс thinking_budget** — `src/utils/chat-helpers.js`: пишет корректное поле
+  `thinking_budget` в feature_config.
+
+**Переменные окружения форка (значения-плейсхолдеры):**
+
+```bash
+BROWSER_CHANNEL_URL=http://<host-gateway>:9100     # шлюз до хоста изнутри контейнера
+BROWSER_CHANNEL_MODELS=model-a,model-b             # ID моделей через браузер-канал (через запятую)
+BROWSER_CHANNEL_IMAGE=true                         # генерацию картинок тоже через канал
+BROWSER_CHANNEL_IMAGE_MODELS=image-model
+BC_RESP_TIMEOUT_MS=3000000                          # таймаут ответа канала (тяжёлый thinking)
+CAPTCHA_DAEMON_URL=http://<host>:9099               # демон капчи
+CHROME_CTR=qwen2api-chrome-headless                 # headless-Chrome контейнер для демона
+OLLAMA_URL=http://<host>:11434                       # vision-модель для поиска выреза слайдера
+OLLAMA_MODEL=qwen2.5vl:7b
+```
+
+**Топология запуска:** `qwen2api` (Node) + пул контейнеров `chrome-solver` (по одному на аккаунт,
+с GPU, у каждого свой прокси и CDP-порт) + контейнер `chrome-headless` + демон капчи на хосте.
+См. `docker/docker-compose.yml` и systemd-юнит `bypass/qwen2api-browser-channel.service`; полные
+заметки по эксплуатации — в [`NOTES.md`](NOTES.md).
 
 ## 🛠️ Быстрый старт
 
@@ -27,6 +73,7 @@ Qwen-Proxy — это прокси-сервис, преобразующий `htt
 - Поддержка CLI-эндпоинта с контекстом 256K и возможностью вызова инструментов
 - Веб-интерфейс управления для удобной настройки и мониторинга
 - Массовое добавление аккаунтов с отображением прогресса в реальном времени, параллельность входа настраивается в системных настройках
+- **(В этом форке)** Браузер-канал UI-драйв обход WAF, пул аккаунтов с по-аккаунтной изоляцией прокси и переключением при сбое, авто-решение капчи Aliyun (см. «Архитектура форка»)
 
 ### ⚠️ Примечание о высокой нагрузке
 
