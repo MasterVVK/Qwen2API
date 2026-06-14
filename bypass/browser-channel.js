@@ -217,7 +217,15 @@ function createDriver(a) {
             // instead of riding the full 50-min timeout (or hanging if an eval wedged).
             if (st.generating && t.length === 0) emptyGenCount++; else emptyGenCount = 0
             if (emptyGenCount >= 700) { dlog('generating but empty >35min — server-side stall, bailing'); throw new Error('completion_stalled') }
-            if (t.length > 0 && ((!st.generating && sawGenerating) || stableCount >= 20)) break
+            // open <think> with no </think> = we're reading mid-reasoning (or the model stalled
+            // at its thinking cap without an answer). Don't end on the 60s-stability fallback while
+            // the model is still generating — a long reasoning pause looks "stable" but isn't done;
+            // the old early-out returned a half-thought answer. While st.generating we keep waiting
+            // (up to RESP_TIMEOUT_MS). When think is open we also distrust a single !st.generating
+            // (stop-icon flicker) and require sustained stability — which also bounds the wait on a
+            // genuine spiral (~90s → the /complete handler then flags it as truncated).
+            const thinkOpen = /<think>/i.test(t) && !/<\/think>/i.test(t)
+            if (t.length > 0 && !st.generating && (thinkOpen ? stableCount >= 30 : (sawGenerating || stableCount >= 30))) break
         }
         return last
     }
@@ -365,9 +373,18 @@ const server = http.createServer((req, res) => {
             const send = c => { if (wantStream) { streamHead(); if (c) res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: { content: c }, finish_reason: null }] })}\n\n`) } }
             try {
                 const text = await withAccount((drv, a) => { usedEmail = a.email || ''; return drv.runViaUI(body, send) })
-                if (wantStream) { streamHead(); res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`); res.write('data: [DONE]\n\n'); res.end() }
-                else { res.writeHead(200, { 'Content-Type': 'application/json', 'x-pool-email': usedEmail }); res.end(JSON.stringify({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }] })) }
-                log(`done: ${text.length} chars [${usedEmail || '?'}]`)
+                // incomplete = an open <think> survives after removing balanced <think>…</think>
+                // blocks → reasoning never reached an answer (mid-think read or thinking-cap spiral).
+                // Don't pass it off as finish_reason:'stop' (a false success) — signal truncation
+                // (finish_reason:'length' + incomplete_details) so the caller treats it as failure
+                // (the novel tool maps length → its own non-thinking fallback). Same OpenAI-standard
+                // signal for stream and non-stream; the streamed deltas are discarded on length.
+                const incomplete = /<\/?think>/i.test(String(text).replace(/<think>[\s\S]*?<\/think>\s*/gi, ''))
+                const finishReason = incomplete ? 'length' : 'stop'
+                const incompleteDetails = incomplete ? { reason: 'thinking_incomplete' } : undefined
+                if (wantStream) { streamHead(); res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: {}, finish_reason: finishReason, ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}) }] })}\n\n`); res.write('data: [DONE]\n\n'); res.end() }
+                else { res.writeHead(200, { 'Content-Type': 'application/json', 'x-pool-email': usedEmail }); res.end(JSON.stringify({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: finishReason, ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}) }] })) }
+                log(incomplete ? `incomplete: unclosed <think>, ${text.length} chars → finish_reason=length [${usedEmail || '?'}]` : `done: ${text.length} chars [${usedEmail || '?'}]`)
             } catch (e) {
                 log('error:', e.message)
                 const blocked = e.message === 'content_filter'
