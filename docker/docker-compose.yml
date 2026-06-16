@@ -10,6 +10,7 @@ services:
       - ./logs:/app/logs
       - ./src:/app/src:ro
       - ./public/captcha.html:/app/public/captcha.html:ro
+      - ./public/dist:/app/public/dist:ro
     env_file:
       - .env
     healthcheck:
