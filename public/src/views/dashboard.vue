@@ -221,7 +221,10 @@
                     <span :title="String(getAccountStats(token.email).chat.input)">{{ formatCompact(getAccountStats(token.email).chat.input) }}</span>
                     in /
                     <span :title="String(getAccountStats(token.email).chat.output)">{{ formatCompact(getAccountStats(token.email).chat.output) }}</span>
-                    out
+                    out /
+                    <span
+                      :class="(getAccountStats(token.email).chat.requests || 0) >= 100 ? 'text-red-600 font-semibold' : (getAccountStats(token.email).chat.requests || 0) >= 85 ? 'text-amber-600 font-semibold' : ''"
+                      :title="'запросов сегодня к дневному лимиту Qwen (~100/аккаунт)'">{{ getAccountStats(token.email).chat.requests || 0 }}/100 зап.</span>
                   </span>
                 </div>
                 <template v-if="getStatusKind(token.email) === 'cli_unsupported'">
@@ -603,7 +606,7 @@ const accountStats = ref({})
 const statsInterval = ref(null)
 const cliQuotaLimit = ref(2000)
 const DEFAULT_STATS = Object.freeze({
-  chat: { input: 0, output: 0 },
+  chat: { input: 0, output: 0, requests: 0 },
   cli: { calls: 0, input: 0, output: 0 }
 })
 
