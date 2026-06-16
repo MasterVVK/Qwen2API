@@ -34,6 +34,7 @@ function mkAccount(o) {
         dbg: Number(o.dbg) || 9561, disp: o.disp || ':1', proxy: o.proxy || null, email: o.email || null,
         client: null, off: null, coolUntil: 0, coolReason: null, lastUsed: 0, busy: false, driver: null,
         ok: 0, fail: 0, lastError: null,   // status counters (surfaced in /health)
+        reqDay: '', reqToday: 0,           // per-account daily request count vs Qwen ~DAILY_CAP/day quota
     }
 }
 function loadPool() {
@@ -45,6 +46,10 @@ function loadPool() {
 }
 const POOL = loadPool()
 function coolAccount(a, ms, why) { a.coolUntil = Date.now() + ms; a.coolReason = why; log(`account ${a.name} cooling ${Math.round(ms / 60000)}min (${why})`) }
+// Qwen caps successful requests per account per day (~100 observed before "daily usage limit").
+// Track it so /health can warn before the pool exhausts. Resets at local-day rollover.
+const DAILY_CAP = Number(process.env.BC_DAILY_CAP || 100)
+function bumpReq(a) { const d = new Date().toISOString().slice(0, 10); if (a.reqDay !== d) { a.reqDay = d; a.reqToday = 0 } a.reqToday++; if (a.reqToday === Math.floor(DAILY_CAP * 0.85)) log(`account ${a.name} at ${a.reqToday}/${DAILY_CAP} daily requests — approaching cap`) }
 
 // Force the container's virtual display to 1920×1080 — matching the proven solver-1 (whose
 // display got sized to 1920 when its noVNC was opened). Fresh clones default to 1024×768 (no
@@ -217,15 +222,16 @@ function createDriver(a) {
             // instead of riding the full 50-min timeout (or hanging if an eval wedged).
             if (st.generating && t.length === 0) emptyGenCount++; else emptyGenCount = 0
             if (emptyGenCount >= 700) { dlog('generating but empty >35min — server-side stall, bailing'); throw new Error('completion_stalled') }
-            // open <think> with no </think> = we're reading mid-reasoning (or the model stalled
-            // at its thinking cap without an answer). Don't end on the 60s-stability fallback while
-            // the model is still generating — a long reasoning pause looks "stable" but isn't done;
-            // the old early-out returned a half-thought answer. While st.generating we keep waiting
-            // (up to RESP_TIMEOUT_MS). When think is open we also distrust a single !st.generating
-            // (stop-icon flicker) and require sustained stability — which also bounds the wait on a
-            // genuine spiral (~90s → the /complete handler then flags it as truncated).
+            // Завершаем ТОЛЬКО когда генерация остановилась И контент стабилен несколько опросов
+            // подряд — НЕ по одному !st.generating: stop-иконка может мигнуть/дать ложный негатив
+            // посреди ответа, и прежний мгновенный выход по `!st.generating && sawGenerating` резал
+            // чистые ответы (напр. гл.98: 1789 симв вместо ~9k). Подтверждение стабильностью:
+            // при стриминге контент растёт → stableCount сбрасывается → мигание не обрывает.
+            // Открытый <think> = ждём дольше (страховка от зависшей stop-иконки и предел спирали ~90с;
+            // дальше /complete пометит это усечением).
             const thinkOpen = /<think>/i.test(t) && !/<\/think>/i.test(t)
-            if (t.length > 0 && !st.generating && (thinkOpen ? stableCount >= 30 : (sawGenerating || stableCount >= 30))) break
+            const stableNeeded = thinkOpen ? 30 : 5   // ~15с подтверждения для ответа, ~90с при открытом think
+            if (t.length > 0 && !st.generating && stableCount >= stableNeeded) break
         }
         return last
     }
@@ -340,7 +346,7 @@ async function withAccount(fn) {
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
-        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; return r }
+        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; bumpReq(a); return r }
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
@@ -355,9 +361,12 @@ async function withAccount(fn) {
 const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/health')) {
         const now = Date.now()
-        const accounts = POOL.map(a => ({ name: a.name, cdpPort: a.cdpPort, proxy: a.proxy, busy: a.busy, available: now >= a.coolUntil, coolForMin: a.coolUntil > now ? Math.round((a.coolUntil - now) / 60000) : 0, coolReason: a.coolUntil > now ? a.coolReason : null, ok: a.ok, fail: a.fail, lastError: a.lastError }))
+        const today = new Date().toISOString().slice(0, 10)
+        const todayReq = a => (a.reqDay === today ? a.reqToday : 0)
+        const accounts = POOL.map(a => ({ name: a.name, cdpPort: a.cdpPort, proxy: a.proxy, busy: a.busy, available: now >= a.coolUntil, coolForMin: a.coolUntil > now ? Math.round((a.coolUntil - now) / 60000) : 0, coolReason: a.coolUntil > now ? a.coolReason : null, ok: a.ok, fail: a.fail, lastError: a.lastError, reqToday: todayReq(a), remaining: Math.max(0, DAILY_CAP - todayReq(a)), nearCap: todayReq(a) >= DAILY_CAP * 0.85 }))
         const free = accounts.filter(x => x.available && !x.busy).length
-        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, pool: accounts.length, free, accounts }))
+        const usedToday = accounts.reduce((s, x) => s + x.reqToday, 0)
+        res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, pool: accounts.length, free, day: today, dailyCap: DAILY_CAP, usedToday, capacityToday: DAILY_CAP * accounts.length, accounts }))
     }
     if (req.method === 'POST' && req.url.startsWith('/complete')) {
         const chunks = []; req.on('data', d => chunks.push(d))

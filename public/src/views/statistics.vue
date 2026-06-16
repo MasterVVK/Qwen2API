@@ -50,6 +50,7 @@
             :key="acc.email"
             :account="acc"
             :range="dateRange"
+            :today="serverToday"
           />
         </div>
       </div>

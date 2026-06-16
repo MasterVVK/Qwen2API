@@ -114,7 +114,7 @@ function delegate(req, res, model) {
                 if (email && (up.statusCode || 200) < 400) {
                     const outText = extractAssistantText(Buffer.concat(bufs).toString('utf8'), !!stream)
                     const usage = createUsageObject(req.body.messages || content, outText, null)
-                    accountManager.accumulateStats(email, 'chat', { input: Number(usage.prompt_tokens) || 0, output: Number(usage.completion_tokens) || 0 })
+                    accountManager.accumulateStats(email, 'chat', { input: Number(usage.prompt_tokens) || 0, output: Number(usage.completion_tokens) || 0, requests: 1 })
                     logger.info(`usage → ${email}: ${usage.prompt_tokens}+${usage.completion_tokens} tok (browser)`, 'BROWSER')
                 }
             } catch (e) { logger.error(`browser-channel usage attribute failed: ${e.message}`, 'BROWSER') }

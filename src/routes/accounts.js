@@ -692,7 +692,7 @@ router.get('/statsHistory', adminKeyVerify, async (req, res) => {
         const chat = entry.chat || {}
         const cli = entry.cli || {}
         history[key] = {
-          chat: { input: Number(chat.input) || 0, output: Number(chat.output) || 0 },
+          chat: { input: Number(chat.input) || 0, output: Number(chat.output) || 0, requests: Number(chat.requests) || 0 },
           cli: {
             calls: Number(cli.calls) || 0,
             input: Number(cli.input) || 0,
@@ -706,7 +706,7 @@ router.get('/statsHistory', adminKeyVerify, async (req, res) => {
       // may mutate the object already handed out.
       const s = account.stats || { chat: { input: 0, output: 0 }, cli: { calls: 0, input: 0, output: 0 } }
       history[today] = {
-        chat: { input: Number(s.chat?.input) || 0, output: Number(s.chat?.output) || 0 },
+        chat: { input: Number(s.chat?.input) || 0, output: Number(s.chat?.output) || 0, requests: Number(s.chat?.requests) || 0 },
         cli: {
           calls: Number(s.cli?.calls) || 0,
           input: Number(s.cli?.input) || 0,

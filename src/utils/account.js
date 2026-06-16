@@ -9,7 +9,7 @@ const { logger } = require('./logger')
  * @returns {Object} default stats
  */
 const createDefaultStats = () => ({
-    chat: { input: 0, output: 0 },
+    chat: { input: 0, output: 0, requests: 0 },
     cli: { calls: 0, input: 0, output: 0 }
 })
 
@@ -23,10 +23,11 @@ const ensureStats = (account) => {
         account.stats = createDefaultStats()
     } else {
         if (!account.stats.chat || typeof account.stats.chat !== 'object') {
-            account.stats.chat = { input: 0, output: 0 }
+            account.stats.chat = { input: 0, output: 0, requests: 0 }
         } else {
             account.stats.chat.input = Number(account.stats.chat.input) || 0
             account.stats.chat.output = Number(account.stats.chat.output) || 0
+            account.stats.chat.requests = Number(account.stats.chat.requests) || 0
         }
         if (!account.stats.cli || typeof account.stats.cli !== 'object') {
             account.stats.cli = { calls: 0, input: 0, output: 0 }
@@ -316,6 +317,7 @@ class Account {
             // Reset today.
             account.stats.chat.input = 0
             account.stats.chat.output = 0
+            account.stats.chat.requests = 0
             account.stats.cli.calls = 0
             account.stats.cli.input = 0
             account.stats.cli.output = 0
@@ -722,6 +724,7 @@ class Account {
         if (kind === 'chat') {
             account.stats.chat.input += input
             account.stats.chat.output += output
+            account.stats.chat.requests += Number(delta.requests) || 0
         } else if (kind === 'cli') {
             account.stats.cli.calls += calls
             account.stats.cli.input += input

@@ -18,6 +18,16 @@
         <span class="px-2 py-1 rounded-lg bg-amber-50 border border-amber-100 text-amber-700" :title="String(totals.cliCalls)">
           {{ t('stats.totals.cliCalls') }}: {{ formatCompact(totals.cliCalls, fmtUnits) }}
         </span>
+        <span class="px-2 py-1 rounded-lg bg-sky-50 border border-sky-100 text-sky-700" :title="'запросов к каналу (qwen3.7-max) за период: ' + totals.chatRequests">
+          запросов: {{ formatCompact(totals.chatRequests, fmtUnits) }}
+        </span>
+        <span
+          class="px-2 py-1 rounded-lg border font-medium"
+          :class="todayRequests >= DAILY_CAP ? 'bg-red-100 border-red-300 text-red-700' : todayRequests >= DAILY_CAP * 0.85 ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-gray-50 border-gray-200 text-gray-600'"
+          :title="'запросов сегодня к дневному лимиту Qwen (~' + DAILY_CAP + '/аккаунт)'"
+        >
+          сегодня: {{ todayRequests }}/{{ DAILY_CAP }}
+        </span>
       </div>
     </div>
 
@@ -43,10 +53,15 @@ import { formatCompact } from '../utils/format.js'
 
 const props = defineProps({
   account: { type: Object, required: true }, // { email, history }
-  range: { type: Array, required: true }     // ['YYYY-MM-DD', ...] in chronological order
+  range: { type: Array, required: true },    // ['YYYY-MM-DD', ...] in chronological order
+  today: { type: String, default: '' }       // server today's YYYY-MM-DD — for daily-quota badge
 })
 
 const { t } = useI18n()
+
+// Qwen per-account daily request cap (~100 observed before "daily usage limit").
+// Mirror of BC_DAILY_CAP in bypass/browser-channel.js.
+const DAILY_CAP = 100
 
 const fmtUnits = computed(() => ({
   unitK: t('dash.acct.unitK'),
@@ -63,6 +78,7 @@ const days = computed(() => {
       date,
       chatInput: Number(chat.input) || 0,
       chatOutput: Number(chat.output) || 0,
+      chatRequests: Number(chat.requests) || 0,
       cliInput: Number(cli.input) || 0,
       cliOutput: Number(cli.output) || 0,
       cliCalls: Number(cli.calls) || 0
@@ -73,10 +89,18 @@ const days = computed(() => {
 const totals = computed(() => days.value.reduce((acc, d) => ({
   chatInput: acc.chatInput + d.chatInput,
   chatOutput: acc.chatOutput + d.chatOutput,
+  chatRequests: acc.chatRequests + d.chatRequests,
   cliInput: acc.cliInput + d.cliInput,
   cliOutput: acc.cliOutput + d.cliOutput,
   cliCalls: acc.cliCalls + d.cliCalls
-}), { chatInput: 0, chatOutput: 0, cliInput: 0, cliOutput: 0, cliCalls: 0 }))
+}), { chatInput: 0, chatOutput: 0, chatRequests: 0, cliInput: 0, cliOutput: 0, cliCalls: 0 }))
+
+// Today's request count toward the daily Qwen cap (history[today] has live stats merged in by /statsHistory).
+const todayRequests = computed(() => {
+  const h = props.account.history || {}
+  const d = h[props.today] || {}
+  return Number(d.chat && d.chat.requests) || 0
+})
 
 const inputs = computed(() => days.value.map(d => d.chatInput + d.cliInput))
 const outputs = computed(() => days.value.map(d => d.chatOutput + d.cliOutput))
