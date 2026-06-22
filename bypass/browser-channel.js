@@ -66,7 +66,14 @@ function ensureResolution(ctr, disp) {
 // socat CDP bridge inside a container (kept top-level so the watchdog can touch every container)
 function ensureSocat(ctr, cdpPort, dbg) {
     try { execFileSync('docker', ['exec', '-u', 'root', ctr, 'sh', '-c', `which socat >/dev/null 2>&1 || (apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq socat xclip xdotool >/dev/null 2>&1)`], { stdio: 'pipe', timeout: 90000 }) } catch (e) {}
-    try { execFileSync('docker', ['exec', ctr, 'sh', '-c', `pgrep -f 'TCP-LISTEN:${cdpPort}' >/dev/null || setsid nohup socat TCP-LISTEN:${cdpPort},fork,reuseaddr TCP:127.0.0.1:${dbg} >/dev/null 2>&1 < /dev/null & sleep 1`], { stdio: 'pipe' }) } catch (e) {}
+    // Use `docker exec -d` (honest detach) — a backgrounded `sh -c '… &'` does NOT survive the
+    // exec session closing, so the bridge silently vanished after a container restart/reboot and
+    // the watchdog never actually re-created it (CDP connect failed storm). Same approach as
+    // pool-login.js. pgrep guard keeps it idempotent.
+    try {
+        const up = execFileSync('docker', ['exec', ctr, 'sh', '-c', `pgrep -f 'TCP-LISTEN:${cdpPort}' >/dev/null && echo up`], { stdio: 'pipe' }).toString().trim()
+        if (up !== 'up') execFileSync('docker', ['exec', '-d', ctr, 'socat', `TCP-LISTEN:${cdpPort},fork,reuseaddr`, `TCP:127.0.0.1:${dbg}`], { stdio: 'pipe' })
+    } catch (e) {}
 }
 
 // ── per-account driver: ALL UI-driving scoped to one account/container, so drivers run concurrently ──
