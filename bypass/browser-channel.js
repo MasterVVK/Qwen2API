@@ -360,7 +360,13 @@ async function withAccount(fn) {
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
-            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'eval_timeout'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
+            // upstream_unreachable = this account's proxy/internet is down. Each account has its OWN
+            // proxy (often on different hosts), so a dead proxy is per-account, NOT global: cool this
+            // one (5min, proxy may come back) and fail over to healthy accounts instead of throwing —
+            // a single dead proxy must not drop the whole request nor leave the account 'available'
+            // (it'd be re-picked straight into the same dead proxy). If ALL proxies are down, every
+            // account cools in turn and withAccount throws upstream_unreachable below → 503 retry, as before.
+            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'eval_timeout', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
             throw e
         }
     }
