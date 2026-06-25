@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch qwen2api data.json and sync the browser-channel pool on change
+
+[Path]
+PathModified=/home/user/Qwen2API/data/data.json
+Unit=qwen2api-pool-sync.service
+
+[Install]
+WantedBy=multi-user.target

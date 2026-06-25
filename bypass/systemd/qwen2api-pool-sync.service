@@ -1,0 +1,12 @@
+[Unit]
+Description=Sync browser-channel pool from qwen2api dashboard accounts (data.json -> pool.json -> provision -> SIGHUP)
+After=qwen2api-browser-channel.service docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/home/user/Qwen2API/bypass
+ExecStart=/usr/bin/node /home/user/Qwen2API/bypass/sync-pool.js
+# bound the provisioning run (container create + chromium login can take ~90s)
+TimeoutStartSec=600

@@ -45,6 +45,27 @@ function loadPool() {
     return [mkAccount({ name: 'solver', ctr: DEFAULT_CTR, cdpPort: 9563 })]
 }
 const POOL = loadPool()
+// Hot-reload: append accounts newly added to pool.json (by sync-pool.js) WITHOUT a restart, so an
+// in-flight edit request is never dropped. Triggered by SIGHUP (sent after the clone is provisioned
+// & logged in). Only ADDS — never mutates/removes existing accounts (would disturb a busy driver).
+function reloadPool() {
+    let arr
+    try { arr = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool.json'), 'utf8')) } catch (e) { log('reloadPool: cannot read pool.json:', e.message); return }
+    if (!Array.isArray(arr)) return
+    const have = new Set(POOL.map(a => a.cdpPort))
+    let added = 0
+    for (const o of arr) {
+        const port = Number(o.cdpPort) || 9563
+        if (have.has(port)) continue
+        POOL.push(mkAccount(o)); added++
+        log(`reloadPool: + account ${o.name || o.email || o.ctr} @ cdp ${port}`)
+    }
+    if (added) log(`reloadPool: pool ${POOL.length - added} → ${POOL.length} (+${added})`)
+    else log('reloadPool: no new accounts')
+}
+// Override Node's default SIGHUP (terminate) so the signal hot-reloads instead of killing the
+// process (which Restart=always would turn into a full restart — the very drop we avoid).
+process.on('SIGHUP', () => { log('SIGHUP — reloading pool'); reloadPool() })
 function coolAccount(a, ms, why) { a.coolUntil = Date.now() + ms; a.coolReason = why; log(`account ${a.name} cooling ${Math.round(ms / 60000)}min (${why})`) }
 // Qwen caps successful requests per account per day (~100 observed before "daily usage limit").
 // Track it so /health can warn before the pool exhausts. Resets at local-day rollover.

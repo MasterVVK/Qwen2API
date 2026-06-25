@@ -3,10 +3,12 @@
  * Provision an account-pool container: auto-login a fresh chrome-solver clone by injecting the
  * account's JWT (from data/data.json) into localStorage — no manual noVNC typing.
  *
- * Mechanism (proven 2026-06-13): the qwen SPA authenticates purely from localStorage.token (no
- * auth cookie). So we drive the fresh chromium like a human (xdotool address bar → chat.qwen.ai,
- * which does NOT trip the WAF), set localStorage.token to the account's JWT via a target-aware
- * CDP connection, then F5 with the window focused so the SPA re-reads the token and logs in.
+ * Mechanism: the qwen SPA authenticates from the account JWT held in BOTH localStorage.token and a
+ * `token` cookie on .qwen.ai (the cookie became required sometime after the 2026-06-13 localStorage-
+ * only finding — without it the SPA renders logged-out even with a valid token & working API). So we
+ * drive the fresh chromium like a human (xdotool address bar → chat.qwen.ai, which does NOT trip the
+ * WAF), set localStorage.token AND the cookie to the account's JWT via a target-aware CDP connection,
+ * then reload with the window focused so the SPA re-reads the token and logs in.
  *
  * Usage:  node pool-login.js <container> <cdpPort> <email>
  *   e.g.  node pool-login.js qwen2api-chrome-solver-3 9565 qoder@synntes.com
@@ -45,6 +47,10 @@ const navOmnibox = () => { X('xdotool key ctrl+l'); execSync('sleep 0.4'); X("xd
     let ev = q => c.Runtime.evaluate({ returnByValue: true, awaitPromise: true, expression: q }).then(r => r.result.value)
     const egress = await ev(`fetch("https://ifconfig.me/ip").then(r=>r.text()).catch(e=>"?")`)
     await ev(`localStorage.setItem('token', ${JSON.stringify(acc.token)})`)
+    // The qwen SPA now also reads the JWT from a `token` COOKIE (changed since the 2026-06-13
+    // localStorage-only finding). Without it the SPA renders logged-out even with a valid token in
+    // localStorage and a working API. Set both so fresh clones authenticate. (verified 2026-06-25)
+    await c.Network.setCookie({ name: 'token', value: acc.token, domain: '.qwen.ai', path: '/', secure: true, httpOnly: false, sameSite: 'Lax' })
     await c.close()
     // 4) reload so the SPA re-reads the token. Full omnibox navigation is reliable; F5 is not
     // (observed: F5 via XTEST sometimes doesn't re-init the SPA even with the window focused).
