@@ -67,6 +67,21 @@ function reloadPool() {
 // process (which Restart=always would turn into a full restart — the very drop we avoid).
 process.on('SIGHUP', () => { log('SIGHUP — reloading pool'); reloadPool() })
 function coolAccount(a, ms, why) { a.coolUntil = Date.now() + ms; a.coolReason = why; log(`account ${a.name} cooling ${Math.round(ms / 60000)}min (${why})`) }
+// Frozen-renderer recovery. A hung page target makes every Runtime.evaluate time out (eval_timeout) AND
+// is unreachable by Page.* (even Page.enable/captureScreenshot hang/error) — only the BROWSER-level /json
+// HTTP endpoints stay alive. So recover by recreating the tab through those: open a fresh chat.qwen.ai
+// target, close the stale one(s), and drop the cached CDP client so the next getClient reconnects to the
+// fresh tab. Login survives (persistent /config profile). Verified live against a frozen solver tab.
+async function recreateTab(a) {
+    const host = '127.0.0.1', port = a.cdpPort
+    let before = []
+    try { before = (await CDP.List({ host, port })).filter(t => t.type === 'page') } catch (e) {}
+    await CDP.New({ host, port, url: 'https://chat.qwen.ai/?temporary-chat=true' })
+    await sleep(1500)
+    for (const t of before) { if (/qwen\.ai/.test(t.url || '')) { try { await CDP.Close({ host, port, id: t.id }) } catch (e) {} } }
+    if (a.client) { try { await a.client.close() } catch (e) {} a.client = null; a.off = null }
+    log(`account ${a.name} tab recreated (frozen-renderer recovery)`)
+}
 // Qwen caps successful requests per account per day (~100 observed before "daily usage limit").
 // Track it so /health can warn before the pool exhausts. Resets at local-day rollover.
 const DAILY_CAP = Number(process.env.BC_DAILY_CAP || 100)
@@ -107,7 +122,7 @@ function createDriver(a) {
     const setClip = text => { try { execFileSync('docker', ['exec', '-i', '-e', `DISPLAY=${a.disp}`, a.ctr, 'sh', '-c', 'xclip -selection clipboard'], { input: text, stdio: ['pipe', 'pipe', 'pipe'] }) } catch (e) {} }
 
     async function getClient() {
-        if (a.client) { try { await a.client.Runtime.evaluate({ expression: '1' }); return a.client } catch (e) { try { await a.client.close() } catch (_) {} a.client = null; a.off = null } }
+        if (a.client) { try { await Promise.race([a.client.Runtime.evaluate({ expression: '1' }), sleep(8000).then(() => { throw new Error('eval_timeout') })]); return a.client } catch (e) { try { await a.client.close() } catch (_) {} a.client = null; a.off = null } }
         ensureSocat(a.ctr, a.cdpPort, a.dbg)
         for (let i = 0; i < 50 && !a.client; i++) { try { a.client = await CDP({ host: '127.0.0.1', port: a.cdpPort }) } catch (e) { await sleep(300) } }
         if (!a.client) throw new Error('CDP connect failed')
@@ -377,7 +392,7 @@ async function withAccount(fn) {
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
-        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; bumpReq(a); return r }
+        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
@@ -387,7 +402,17 @@ async function withAccount(fn) {
             // a single dead proxy must not drop the whole request nor leave the account 'available'
             // (it'd be re-picked straight into the same dead proxy). If ALL proxies are down, every
             // account cools in turn and withAccount throws upstream_unreachable below → 503 retry, as before.
-            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'eval_timeout', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
+            // eval_timeout = this account's page renderer is hung: every Runtime.evaluate times out and even
+            // Page.* is unreachable, so cooling+retrying the SAME tab loops forever (reqToday stuck at 0). After
+            // 2 in a row, recreate the tab via the browser-level /json endpoints (which stay alive) so the
+            // account self-heals instead of silently dying. Cool first so it isn't re-picked mid-recreation.
+            if (e.message === 'eval_timeout') {
+                a.evalTO = (a.evalTO || 0) + 1
+                coolAccount(a, 5 * 60 * 1000, 'eval_timeout')
+                if (a.evalTO >= 2) { try { await recreateTab(a) } catch (re) { log(`account ${a.name} recreateTab failed: ${re.message}`) } a.evalTO = 0 }
+                continue
+            }
+            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
             throw e
         }
     }
