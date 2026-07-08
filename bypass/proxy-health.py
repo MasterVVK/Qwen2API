@@ -2,14 +2,17 @@
 """
 proxy-health.py — health of the browser-channel account proxies.
 
-Reads the channel /health (:9100), then for each account tests its proxy by
-doing an HTTPS CONNECT to chat.qwen.ai through it, and classifies:
+Reads the channel /health (:9100), then for each account tests its proxy (a
+request to chat.qwen.ai, plus a raw-IP request when that fails) and classifies:
 
   OK           proxy reaches Qwen (HTTP 200)
-  NO-INTERNET  proxy port is open (service up) but it can't tunnel out
-               (tinyproxy "500 Unable to connect" / curl 000) -> the proxy HOST
-               lost its internet uplink (WAN / gateway / DNS)
+  DNS-FAIL     port open, hostname fails but a raw-IP request works -> the proxy
+               HOST has an internet uplink, only NAME RESOLUTION is broken
+               (dead/unreachable DNS resolver)
+  NO-UPLINK    port open, hostname AND raw-IP both fail -> the proxy HOST has no
+               route out (WAN / gateway down)
   DOWN         proxy host/port unreachable (service or host is down)
+  DIRECT       account has no proxy (uses the container network)
 
 Also surfaces the channel's own per-account lastError / reqToday so you can
 line up the live symptom (upstream_unreachable) with the proxy verdict.
@@ -46,21 +49,41 @@ def tcp_open(host, port, t=3):
         return False
 
 
-def probe(proxy):
-    """Return (classification, http_code) for one proxy."""
-    if not proxy or proxy.strip().lower() in ("direct", "none", "-", ""):
-        return "DIRECT", "-"   # account uses the container's own network, no proxy to probe
+IP_TARGET = "http://1.1.1.1/"   # raw IP -> no DNS involved; a reachable proxy gets a 3xx from Cloudflare
+
+
+def curl_code(proxy, url):
     try:
-        code = subprocess.run(
+        return subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-             "-x", proxy, "--max-time", "12", TARGET],
+             "-x", proxy, "--max-time", "12", url],
             capture_output=True, text=True, timeout=15).stdout.strip() or "ERR"
     except Exception:
-        code = "ERR"
-    if code == "200":
-        return "OK", code
+        return "ERR"
+
+
+def probe(proxy):
+    """Return (verdict, detail) for one proxy.
+
+    OK         hostname reaches Qwen (200)
+    DNS-FAIL   port open, hostname fails, but a raw-IP request succeeds -> the proxy host
+               has an uplink; name resolution is broken (dead/unreachable DNS resolver)
+    NO-UPLINK  port open, both hostname AND raw-IP fail -> the proxy host has no route out
+    DOWN       proxy host/port unreachable (service or host down)
+    DIRECT     account uses the container network, no proxy to probe
+    """
+    if not proxy or proxy.strip().lower() in ("direct", "none", "-", ""):
+        return "DIRECT", "-"
+    host_code = curl_code(proxy, TARGET)          # hostname chat.qwen.ai -> needs DNS
+    if host_code == "200":
+        return "OK", host_code
     host, port = host_port(proxy)
-    return ("NO-INTERNET" if tcp_open(host, port) else "DOWN"), code
+    if not tcp_open(host, port):
+        return "DOWN", host_code
+    ip_code = curl_code(proxy, IP_TARGET)         # raw IP -> no DNS
+    if ip_code[:1] in ("2", "3"):                 # a real server answered -> the uplink is fine
+        return "DNS-FAIL", f"host={host_code} ip={ip_code}"
+    return "NO-UPLINK", f"host={host_code} ip={ip_code}"
 
 
 def sweep():
@@ -75,11 +98,13 @@ def sweep():
 
 
 def table(res):
-    print(f"{'account':16} {'proxy':26} {'verdict':12} {'code':5} {'lastError':20} req")
+    print(f"{'account':16} {'proxy':26} {'verdict':10} {'lastError':20} {'req':>4}  detail")
     for name, v in res.items():
         mark = "" if v["cls"] in ("OK", "DIRECT") else "  <-- problem"
-        print(f"  {name:16} {v['proxy']:26} {v['cls']:12} {v['code']:5} "
-              f"{str(v['err']):20} {v['req']}{mark}")
+        print(f"  {name:16} {v['proxy']:26} {v['cls']:10} "
+              f"{str(v['err']):20} {str(v['req']):>4}  {v['code']}{mark}")
+    print("  verdicts: OK | DNS-FAIL (uplink ok, DNS broken) | "
+          "NO-UPLINK (no route out) | DOWN | DIRECT")
 
 
 def watch(interval):
