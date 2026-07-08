@@ -47,21 +47,28 @@ function loadPool() {
 const POOL = loadPool()
 // Hot-reload: append accounts newly added to pool.json (by sync-pool.js) WITHOUT a restart, so an
 // in-flight edit request is never dropped. Triggered by SIGHUP (sent after the clone is provisioned
-// & logged in). Only ADDS — never mutates/removes existing accounts (would disturb a busy driver).
+// & logged in). ADDS new accounts, and refreshes the `proxy` LABEL of existing ones — proxy is only
+// used for /health reporting (real routing is baked into the container's Chrome at provision), so
+// updating it never disturbs a busy driver, and keeps /health honest after a dashboard proxy change.
 function reloadPool() {
     let arr
     try { arr = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool.json'), 'utf8')) } catch (e) { log('reloadPool: cannot read pool.json:', e.message); return }
     if (!Array.isArray(arr)) return
-    const have = new Set(POOL.map(a => a.cdpPort))
-    let added = 0
+    const byPort = new Map(POOL.map(a => [a.cdpPort, a]))
+    let added = 0, updated = 0
     for (const o of arr) {
         const port = Number(o.cdpPort) || 9563
-        if (have.has(port)) continue
+        const existing = byPort.get(port)
+        if (existing) {
+            const np = o.proxy || null
+            if ((existing.proxy || null) !== np) { log(`reloadPool: ~ ${existing.name} proxy ${existing.proxy || 'direct'} → ${np || 'direct'}`); existing.proxy = np; updated++ }
+            continue
+        }
         POOL.push(mkAccount(o)); added++
         log(`reloadPool: + account ${o.name || o.email || o.ctr} @ cdp ${port}`)
     }
-    if (added) log(`reloadPool: pool ${POOL.length - added} → ${POOL.length} (+${added})`)
-    else log('reloadPool: no new accounts')
+    if (added || updated) log(`reloadPool: ${POOL.length} accounts (+${added} new, ~${updated} proxy label)`)
+    else log('reloadPool: no changes')
 }
 // Override Node's default SIGHUP (terminate) so the signal hot-reloads instead of killing the
 // process (which Restart=always would turn into a full restart — the very drop we avoid).
