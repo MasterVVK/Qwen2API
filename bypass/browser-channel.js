@@ -117,7 +117,10 @@ function ensureSocat(ctr, cdpPort, dbg) {
         // Liveness check probes the bridge end-to-end (curl the CDP port), NOT `pgrep -f 'TCP-LISTEN:<port>'`:
         // that pattern is present in the `sh -c` wrapper's own argv, so pgrep -f self-matches and ALWAYS
         // reports "up" — the bridge could be dead and this watchdog would never rebuild it (silent CDP-storm).
-        const up = execFileSync('docker', ['exec', ctr, 'sh', '-c', `curl -s -m2 http://127.0.0.1:${cdpPort}/json/version >/dev/null 2>&1 && echo up`], { stdio: 'pipe' }).toString().trim()
+        // `|| true`: когда мост лежит, curl выходит ненулевым кодом → без этого execFileSync
+        // бросает исключение → catch → спавн socat ниже НИКОГДА не выполняется (self-heal
+        // чинил мост только когда тот и так жив). Ровно так канал встал после ребута.
+        const up = execFileSync('docker', ['exec', ctr, 'sh', '-c', `curl -s -m2 http://127.0.0.1:${cdpPort}/json/version >/dev/null 2>&1 && echo up || true`], { stdio: 'pipe' }).toString().trim()
         if (up !== 'up') execFileSync('docker', ['exec', '-d', ctr, 'socat', `TCP-LISTEN:${cdpPort},fork,reuseaddr`, `TCP:127.0.0.1:${dbg}`], { stdio: 'pipe' })
     } catch (e) {}
 }
