@@ -52,6 +52,7 @@ function service(a) {
       - PGID=1000
       - TZ=Europe/Moscow
       - SELKIES_ENCODER=jpeg
+      - MAX_RES=1920x1080
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561${proxyFlag} about:blank
