@@ -89,6 +89,20 @@ async function recreateTab(a) {
     if (a.client) { try { await a.client.close() } catch (e) {} a.client = null; a.off = null }
     log(`account ${a.name} tab recreated (frozen-renderer recovery)`)
 }
+// Park an account's tab on about:blank after each request. An idle chat.qwen.ai tab keeps
+// repainting (~1-1.5 CPU cores) even when nothing drives it (finished/animated chat never stops);
+// about:blank drops it to ~5%. The driver re-navigates to chat.qwen.ai (temporaryChat) at the START
+// of every request, so parking is transparent to the pipeline and invisible to Qwen (they already
+// see a fresh temporary-chat load per request). Uses xdotool — the SAME nav path the driver uses —
+// so no CDP-write quirks. Synchronous+best-effort; called while the account is still busy so no
+// concurrent request grabs it mid-navigation.
+function parkTab(a) {
+    try {
+        execFileSync('docker', ['exec', '-e', `DISPLAY=${a.disp}`, a.ctr, 'sh', '-c',
+            'W=$(xdotool search --onlyvisible --class chromium | head -1); [ -n "$W" ] && xdotool windowactivate "$W" 2>/dev/null; xdotool key ctrl+l; sleep 0.3; xdotool type --clearmodifiers "about:blank"; xdotool key Return'],
+            { stdio: 'pipe', timeout: 8000 })
+    } catch (e) {}
+}
 // Qwen caps successful requests per account per day (~100 observed before "daily usage limit").
 // Track it so /health can warn before the pool exhausts. Resets at local-day rollover.
 const DAILY_CAP = Number(process.env.BC_DAILY_CAP || 100)
@@ -402,7 +416,7 @@ async function withAccount(fn) {
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
-        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
+        try { const r = await fn(driverFor(a), a); parkTab(a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
