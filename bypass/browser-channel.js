@@ -416,7 +416,7 @@ async function withAccount(fn) {
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
-        try { const r = await fn(driverFor(a), a); parkTab(a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
+        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
@@ -439,6 +439,7 @@ async function withAccount(fn) {
             if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
             throw e
         }
+        finally { try { parkTab(a) } catch (pe) {} }
     }
     throw lastErr || new Error('no_account_available')
 }
