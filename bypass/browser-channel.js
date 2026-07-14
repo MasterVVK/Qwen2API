@@ -45,6 +45,16 @@ function loadPool() {
     return [mkAccount({ name: 'solver', ctr: DEFAULT_CTR, cdpPort: 9563 })]
 }
 const POOL = loadPool()
+// JWT for auto-relogin: read FRESH from data.json by email (the token can be rotated by the
+// dashboard, so don't cache via require). Returns null if not found — caller leaves the account as-is.
+function accToken(email) {
+    if (!email) return null
+    try {
+        const d = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'data.json'), 'utf8'))
+        const acc = (d.accounts || []).find(x => x.email === email)
+        return (acc && acc.token) || null
+    } catch (e) { return null }
+}
 // Hot-reload: append accounts newly added to pool.json (by sync-pool.js) WITHOUT a restart, so an
 // in-flight edit request is never dropped. Triggered by SIGHUP (sent after the clone is provisioned
 // & logged in). ADDS new accounts, and refreshes the `proxy` LABEL of existing ones — proxy is only
@@ -193,6 +203,26 @@ function createDriver(a) {
         dlog(ok ? 'captcha cleared' : 'captcha NOT cleared after retries')
         return ok
     }
+    // Session can drop despite the persistent profile (SPA renders "Log in / Sign up", URL /c/guest) →
+    // every request then stalls (completion_stalled) until a manual pool-login. Auto-recover by
+    // re-injecting the account JWT exactly like pool-login.js (localStorage.token + `token` cookie on
+    // .qwen.ai) and reloading via the WAF-safe omnibox nav, so the account self-heals on next use.
+    async function ensureLoggedIn() {
+        const out = await ev(`(()=>{const b=document.body.innerText||"";return /Log in|Sign up/i.test(b)||!localStorage.getItem("token");})()`).catch(() => false)
+        if (!out) return true
+        const token = accToken(a.email)
+        if (!token) { dlog('session lost but no JWT in data.json for re-login'); return false }
+        dlog('session lost — auto re-login (re-injecting JWT)')
+        await ev(`localStorage.setItem('token', ${JSON.stringify(token)})`).catch(() => {})
+        try { await a.client.Network.setCookie({ name: 'token', value: token, domain: '.qwen.ai', path: '/', secure: true, httpOnly: false, sameSite: 'Lax' }) } catch (e) {}
+        xdo('xdotool key ctrl+l'); await sleep(600)
+        xdo('xdotool type --clearmodifiers --delay 20 "https://chat.qwen.ai/?temporary-chat=true"'); await sleep(500)
+        xdo('xdotool key Return'); await sleep(9000)
+        await ensureNoCaptcha().catch(() => {})
+        const ok = await ev(`(()=>{const b=document.body.innerText||"";return !/Log in|Sign up/i.test(b)&&!!localStorage.getItem("token");})()`).catch(() => false)
+        dlog(ok ? 'auto re-login OK' : 'auto re-login FAILED')
+        return ok
+    }
     const isTemp = () => ev(`/temporary-chat=true/.test(location.href)`)
     const pageError = () => ev(`(()=>{const u=location.href||'';const b=(document.body&&document.body.innerText)||'';return /^chrome-error|^about:neterror/i.test(u)||/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|This site can.t be reached|can.t be reached/i.test(b);})()`)
     async function temporaryChat() {
@@ -207,6 +237,7 @@ function createDriver(a) {
                 await sleep(8000); continue
             }
             if (await isTemp().catch(() => false)) {
+                await ensureLoggedIn().catch(() => {})   // #2: self-heal a dropped session before sending
                 for (let i = 0; i < 20; i++) { if (await ev(`!!document.querySelector("textarea")`).catch(() => false)) break; await sleep(500) }
                 dlog('temporary chat: on'); return true
             }
