@@ -447,7 +447,7 @@ async function withAccount(fn) {
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
-        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; a.evalTO = 0; bumpReq(a); return r }
+        try { const r = await fn(driverFor(a), a); a.busy = false; a.ok++; a.evalTO = 0; a.driveFail = 0; bumpReq(a); return r }
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
@@ -467,7 +467,21 @@ async function withAccount(fn) {
                 if (a.evalTO >= 2) { try { await recreateTab(a) } catch (re) { log(`account ${a.name} recreateTab failed: ${re.message}`) } a.evalTO = 0 }
                 continue
             }
-            if (['CDP connect failed', 'drive_failed', 'completion_stalled', 'qwen_error', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
+            // drive_failed = page loaded but UI unusable (SPA rendered blank / no textarea / model picker never
+            // appeared) — a wedged-but-authenticated tab where selectModel/sendPrompt keep failing and reqToday
+            // freezes. Like eval_timeout, cooling+retrying the same tab loops forever, so after 3 in a row
+            // recreate the tab so the account self-heals. GUARD: only recreate when the account still has quota
+            // headroom — hitting the DAILY LIMIT also surfaces as drive_failed (send can't start generation), but
+            // a capped account needs the daily reset, NOT a tab recreate. A wedged tab has LOW reqToday; a capped
+            // one is nearCap. So skip recreate when nearCap (avoids uselessly recreating quota-capped tabs).
+            if (e.message === 'drive_failed') {
+                a.driveFail = (a.driveFail || 0) + 1
+                coolAccount(a, 5 * 60 * 1000, 'drive_failed')
+                const rtToday = a.reqDay === new Date().toISOString().slice(0, 10) ? a.reqToday : 0
+                if (a.driveFail >= 3 && rtToday < DAILY_CAP * 0.85) { try { await recreateTab(a) } catch (re) { log(`account ${a.name} recreateTab (drive_failed) failed: ${re.message}`) } a.driveFail = 0 }
+                continue
+            }
+            if (['CDP connect failed', 'completion_stalled', 'qwen_error', 'upstream_unreachable'].includes(e.message)) { coolAccount(a, 5 * 60 * 1000, e.message); continue }
             throw e
         }
         finally { try { parkTab(a) } catch (pe) {} }
