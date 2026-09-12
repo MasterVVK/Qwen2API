@@ -55,7 +55,7 @@ function service(a) {
       - MAX_RES=1920x1080
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --disk-cache-size=268435456 --disable-gpu-shader-disk-cache${proxyFlag} about:blank
+      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --disk-cache-size=268435456 --disable-gpu-shader-disk-cache --disable-features=DIPS,NetworkActionPredictor,SiteCharacteristicsDatabase,Reporting,NetworkErrorLogging,SegmentationPlatform,OptimizationHints --disable-background-networking --disable-domain-reliability --disable-sync --disable-breakpad --no-pings${proxyFlag} about:blank
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -67,10 +67,21 @@ function service(a) {
       - "127.0.0.1:${a.cdpPort}:${a.cdpPort}"   # CDP bridge (socat) — ${a.email || a.name} / ${proxy || 'direct'}
       - "192.168.0.58:${nv1}:3000"   # noVNC http
       - "192.168.0.58:${nv2}:3001"   # noVNC https
+    # Профиль целиком в RAM: диск-копия лежит в /config/.chromium-disk и
+    # восстанавливается сюда до старта Chrome, поэтому сессия Qwen переживает
+    # перезапуск контейнера и перезагрузку машины. Обратный синк — по таймеру
+    # chrome-profile-sync.timer.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - 'mkdir -p /config/.config/chromium && cp -a /config/.chromium-disk/. /config/.config/chromium/ 2>/dev/null; chown -R 1000:1000 /config/.config/chromium; exec /init'
     tmpfs:
       # Кэш Chrome в RAM: на диск он писал ~1 МБ/с на все контейнеры (~90 ГБ/сутки).
-      # Переживать перезапуск кэшу не нужно; сессии Qwen лежат в /config/.config и остаются на диске.
       - /config/.cache:size=1g,uid=1000,gid=1000,mode=0755
+      # Весь профиль в RAM: замер дал 24.5 МБ записи на запрос против 110.5 у
+      # дискового профиля — Chrome целиком переписывает свои sqlite/leveldb базы
+      # (TransportSecurity, History, Network Persistent State) на каждый чих.
+      - /config/.config/chromium:size=1g,uid=1000,gid=1000,mode=0755
     shm_size: "1gb"
     restart: unless-stopped`
 }
@@ -97,8 +108,15 @@ for (const a of clones) {
 const DOCKER_DIR = path.join(ROOT, 'docker')
 const poolServices = ['chrome-solver', ...clones.map(a => `chrome-solver-${suffixOf(a.ctr)}`)]
 const composeArgs = ['compose', '-p', 'docker', '--project-directory', DOCKER_DIR, '-f', 'docker-compose.yml', '-f', 'docker-compose.pool.yml', 'up', '-d', ...poolServices]
-console.log('$ docker', composeArgs.join(' '))
-execFileSync('docker', composeArgs, { cwd: DOCKER_DIR, stdio: 'inherit' })
+if (process.argv.includes('--no-apply')) {
+    // Пересоздание всех солверов разом кладёт канал целиком; с этим флагом файл
+    // только генерируется, а применять можно по одному сервису вручную.
+    console.log('--no-apply: конфиг сгенерирован, контейнеры не тронуты')
+    console.log('  применить по одному: cd docker && docker compose -f docker-compose.yml -f docker-compose.pool.yml up -d <сервис>')
+} else {
+    console.log('$ docker', composeArgs.join(' '))
+    execFileSync('docker', composeArgs, { cwd: DOCKER_DIR, stdio: 'inherit' })
+}
 
 // 4) optional: auto-login freshly-created clones
 if (process.argv.includes('--login')) {

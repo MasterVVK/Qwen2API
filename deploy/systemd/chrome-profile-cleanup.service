@@ -1,0 +1,12 @@
+[Unit]
+Description=Очистка распухающих баз профиля Chrome в солверах пула qwen2api
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=user
+Group=user
+ExecStart=/home/user/Qwen2API/bypass/chrome-profile-cleanup.sh
+# Восемь контейнеров по одному с паузой 45 с — с запасом
+TimeoutStartSec=1800

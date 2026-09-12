@@ -1,0 +1,7 @@
+[Unit]
+Description=Ротация логов novelbins (celery_llm.log растёт ~170 МБ в сутки)
+After=novelbins-llm-worker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/novelbins --state /var/lib/logrotate/novelbins.status

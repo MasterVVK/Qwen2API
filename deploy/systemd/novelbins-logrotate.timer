@@ -1,0 +1,12 @@
+[Unit]
+Description=Почасовая проверка размера логов novelbins
+
+[Timer]
+# Штатный logrotate.timer ходит раз в сутки — за это время лог успевает
+# перерасти порог втрое. Почасовая проверка держит активный файл у 50-60 МБ.
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

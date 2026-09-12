@@ -1,0 +1,18 @@
+# Логи novelbins-epub. celery_llm.log растёт ~0.5 МБ на переведённую главу
+# (к 15:31 12.09 — 147 МБ за 290 глав) и ротации не имел: полный grep по нему
+# уже не проходил по таймауту.
+#
+# copytruncate обязателен: celery держит файл открытым и после обычной ротации
+# с переименованием продолжил бы писать в отвязанный inode — новый файл остался
+# бы пустым, а место не освободилось.
+/home/user/novelbins-epub/web_app/logs/*.log {
+    size 50M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su user user
+    create 0644 user user
+}
