@@ -39,7 +39,7 @@ services:
       - MAX_RES=1920x1080
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --proxy-server=http://192.168.0.61:8888 about:blank
+      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --disk-cache-size=268435456 --disable-gpu-shader-disk-cache --proxy-server=http://192.168.0.61:8888 about:blank
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -51,6 +51,9 @@ services:
       - "127.0.0.1:9563:9563"   # CDP bridge (socat) — host reaches the solver's chromium
       - "192.168.0.58:3012:3000"   # noVNC (http)  — manual view of the .61 logged-in session
       - "192.168.0.58:3013:3001"   # noVNC (https)
+    tmpfs:
+      # Кэш Chrome в RAM — см. комментарий в bypass/provision-pool.js
+      - /config/.cache:size=1g,uid=1000,gid=1000,mode=0755
     shm_size: "1gb"
     restart: unless-stopped
 

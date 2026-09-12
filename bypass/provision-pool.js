@@ -55,7 +55,7 @@ function service(a) {
       - MAX_RES=1920x1080
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561${proxyFlag} about:blank
+      - CHROME_CLI=/config/.config/chromium --start-maximized --remote-debugging-port=9561 --disk-cache-size=268435456 --disable-gpu-shader-disk-cache${proxyFlag} about:blank
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -67,6 +67,10 @@ function service(a) {
       - "127.0.0.1:${a.cdpPort}:${a.cdpPort}"   # CDP bridge (socat) — ${a.email || a.name} / ${proxy || 'direct'}
       - "192.168.0.58:${nv1}:3000"   # noVNC http
       - "192.168.0.58:${nv2}:3001"   # noVNC https
+    tmpfs:
+      # Кэш Chrome в RAM: на диск он писал ~1 МБ/с на все контейнеры (~90 ГБ/сутки).
+      # Переживать перезапуск кэшу не нужно; сессии Qwen лежат в /config/.config и остаются на диске.
+      - /config/.cache:size=1g,uid=1000,gid=1000,mode=0755
     shm_size: "1gb"
     restart: unless-stopped`
 }
@@ -80,14 +84,21 @@ console.log(`generated docker/docker-compose.pool.yml — ${clones.length} clone
 // 2) ensure profile dirs exist (owned by the container's PUID/PGID 1000)
 const fresh = []
 for (const a of clones) {
-    const dir = path.join(ROOT, `chrome-solver-config-${suffixOf(a.ctr)}`)
+    const dir = path.join(ROOT, 'docker', `chrome-solver-config-${suffixOf(a.ctr)}`)
     if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); try { execFileSync('chown', ['1000:1000', dir]) } catch (e) {} fresh.push(a); console.log(`created profile dir ${dir}`) }
 }
 
 // 3) apply — compose recreates ONLY services whose definition changed
-const composeArgs = ['compose', '-p', 'qwen2api', '--project-directory', ROOT, '-f', 'docker/docker-compose.yml', '-f', 'docker/docker-compose.pool.yml', 'up', '-d']
+// Имя проекта — `docker` (по каталогу с compose-файлами): именно так созданы работающие
+// контейнеры. С чужим `-p` compose пытается создать их заново и падает на конфликте имён.
+// Применяем ТОЛЬКО сервисы пула: контейнеры qwen2api и qwen2api-chrome-headless
+// принадлежат другому compose-проекту (`qwen2api`), и без явного списка сервисов
+// compose пытается пересоздать и их — падая на конфликте имён.
+const DOCKER_DIR = path.join(ROOT, 'docker')
+const poolServices = ['chrome-solver', ...clones.map(a => `chrome-solver-${suffixOf(a.ctr)}`)]
+const composeArgs = ['compose', '-p', 'docker', '--project-directory', DOCKER_DIR, '-f', 'docker-compose.yml', '-f', 'docker-compose.pool.yml', 'up', '-d', ...poolServices]
 console.log('$ docker', composeArgs.join(' '))
-execFileSync('docker', composeArgs, { cwd: ROOT, stdio: 'inherit' })
+execFileSync('docker', composeArgs, { cwd: DOCKER_DIR, stdio: 'inherit' })
 
 // 4) optional: auto-login freshly-created clones
 if (process.argv.includes('--login')) {
