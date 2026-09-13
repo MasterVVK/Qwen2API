@@ -15,7 +15,8 @@ set -uo pipefail
 
 DOCKER_DIR=/home/user/Qwen2API/docker
 HEALTH=http://localhost:9100/health
-SETTLE=45          # сколько ждать после старта контейнера
+SETTLE=60          # сколько ждать после старта контейнера
+START_TRIES=3      # столько раз пробуем поднять контейнер, прежде чем сдаться
 MAX_FAILURES=1     # после стольких неудач подряд прекращаем проход
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -81,15 +82,23 @@ for n in 8 7 6 5 4 3 2 ""; do
     rm -rf "$D/Site Characteristics Database" \
            "$cfg/.chromium-disk/segmentation_platform" 2>/dev/null
 
-    if ! docker compose -f docker-compose.yml -f docker-compose.pool.yml up -d "$svc" >/dev/null 2>&1; then
-        echo "$svc: НЕ УДАЛОСЬ поднять — прекращаем проход"
-        exit 1
-    fi
+    # Одной попытки мало: в ночь на 13.09 контейнер завершился штатно
+    # (ExitCode 0) и не встал за отведённое время, из-за чего проход оборвался
+    # на последнем солвере. Пробуем несколько раз, прежде чем сдаться.
+    started=no
+    for try in $(seq 1 "$START_TRIES"); do
+        docker compose -f docker-compose.yml -f docker-compose.pool.yml up -d "$svc" >/dev/null 2>&1
+        sleep "$SETTLE"
+        if [ "$(docker inspect -f '{{.State.Running}}' "$ctr" 2>/dev/null)" = "true" ]; then
+            started=yes
+            [ "$try" -gt 1 ] && echo "$svc: поднялся с попытки $try"
+            break
+        fi
+        echo "$svc: попытка $try из $START_TRIES не удалась"
+    done
 
-    sleep "$SETTLE"
-
-    if [ "$(docker inspect -f '{{.State.Running}}' "$ctr" 2>/dev/null)" != "true" ]; then
-        echo "$svc: контейнер не поднялся"
+    if [ "$started" != yes ]; then
+        echo "$svc: контейнер не поднялся за $START_TRIES попыток"
         failures=$((failures + 1))
         [ "$failures" -ge "$MAX_FAILURES" ] && { echo "прекращаем проход"; exit 1; }
         continue
