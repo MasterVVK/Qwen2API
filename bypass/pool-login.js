@@ -59,6 +59,27 @@ const navOmnibox = () => { X('xdotool key ctrl+l'); execSync('sleep 0.4'); X("xd
     c = await conn(); ev = q => c.Runtime.evaluate({ returnByValue: true, expression: q }).then(r => r.result.value)
     const st = await ev(`(()=>{const b=document.body.innerText||"";return {loggedIn:!/Log in|Sign up/i.test(b)&&!!localStorage.getItem("token"),user:(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length===0&&x.getBoundingClientRect().bottom>650&&x.textContent.trim().length>0&&x.textContent.trim().length<20);return e?e.textContent.trim():"?"})()}})()`)
     await c.close()
+    // 6) Qwen's SPA (auth.qwen.ai v2) now renews a 15-min access_token from a `refresh_token` cookie;
+    // if that refresh_token is revoked, an injected JWT is wiped right away. Fall back to a real
+    // password login through the UI form, which issues a fresh refresh_token. (verified 15.10.2026)
+    if (!st.loggedIn && acc.password) {
+        console.log(`${CTR}: token injection did not stick — logging in via password form…`)
+        focus(); await sleep(500)
+        X('xdotool key ctrl+l'); execSync('sleep 0.4'); X("xdotool type --delay 30 'https://chat.qwen.ai/auth?action=signin'"); execSync('sleep 0.4'); X('xdotool key Return')
+        await sleep(9000)
+        c = await conn(); ev = q => c.Runtime.evaluate({ returnByValue: true, expression: q }).then(r => r.result.value)
+        const clickText = t => ev(`(()=>{const b=[...document.querySelectorAll('button,a,span,div')].filter(x=>x.innerText&&x.innerText.trim()===${JSON.stringify(t)}&&x.getBoundingClientRect().width>0).pop();if(!b)return false;b.click();return true})()`)
+        const fill = (sel, val) => ev(`(()=>{const i=document.querySelector(${JSON.stringify(sel)});if(!i)return false;i.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,${JSON.stringify(val)});i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}));return true})()`)
+        if (!(await ev(`!!document.querySelector('input[type=password]')`))) { await clickText('Log in with a password'); await sleep(2500) }
+        await fill('input[name=email]', EMAIL); await fill('input[type=password]', acc.password); await sleep(500)
+        await clickText('Log in')
+        for (let i = 0; i < 20; i++) { await sleep(1000); if (await ev(`!/\\/auth/.test(location.pathname)&&!!localStorage.getItem('qwen_access_token_state')`).catch(() => false)) break }
+        await c.close()
+        focus(); await sleep(800); navOmnibox(); await sleep(13000)
+        c = await conn(); ev = q => c.Runtime.evaluate({ returnByValue: true, expression: q }).then(r => r.result.value)
+        st.loggedIn = await ev(`(()=>{const b=document.body.innerText||"";return !/Log in|Sign up/i.test(b)&&!!localStorage.getItem("token");})()`)
+        await c.close()
+    }
     console.log(`${st.loggedIn ? '✓' : '✗'} ${EMAIL} @ ${CTR} (cdp ${PORT}) — egress ${egress} — ${st.loggedIn ? 'LOGGED IN as ' + st.user : 'NOT logged in'}`)
     process.exit(st.loggedIn ? 0 : 3)
 })().catch(e => { console.log(`✗ ${EMAIL}: ${e.message}`); process.exit(1) })

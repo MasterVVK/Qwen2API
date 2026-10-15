@@ -55,6 +55,15 @@ function accToken(email) {
         return (acc && acc.token) || null
     } catch (e) { return null }
 }
+// Plain password for the UI-form re-login (same data.json record the dashboard logs in with).
+function accPassword(email) {
+    if (!email) return null
+    try {
+        const d = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'data.json'), 'utf8'))
+        const acc = (d.accounts || []).find(x => x.email === email)
+        return (acc && acc.password) || null
+    } catch (e) { return null }
+}
 // Hot-reload: append accounts newly added to pool.json (by sync-pool.js) WITHOUT a restart, so an
 // in-flight edit request is never dropped. Triggered by SIGHUP (sent after the clone is provisioned
 // & logged in). ADDS new accounts, and refreshes the `proxy` LABEL of existing ones — proxy is only
@@ -207,9 +216,18 @@ function createDriver(a) {
     // every request then stalls (completion_stalled) until a manual pool-login. Auto-recover by
     // re-injecting the account JWT exactly like pool-login.js (localStorage.token + `token` cookie on
     // .qwen.ai) and reloading via the WAF-safe omnibox nav, so the account self-heals on next use.
+    // The v2 SPA first renders "logged in" from a stale localStorage JWT, then ~2–5 s later its
+    // refresh call gets "Token is revoked" and it logs out (sets qwen_token_logged_out_marker, wipes
+    // the token) — mid-request, so the send never takes. A single instant check passed that window.
+    // Poll until auth settles: logged in only with the access-token state and no logged-out marker.
+    const sessionLost = async () => {
+        const q = `(()=>{const b=document.body.innerText||"";if(localStorage.getItem("qwen_token_logged_out_marker")||/Log in|Sign up/i.test(b)||!localStorage.getItem("token"))return "lost";return localStorage.getItem("qwen_access_token_state")?"ok":"wait";})()`
+        let s = 'wait'
+        for (let i = 0; i < 8 && s === 'wait'; i++) { s = await ev(q).catch(() => 'ok'); if (s === 'wait') await sleep(1000) }
+        return s === 'lost'
+    }
     async function ensureLoggedIn() {
-        const out = await ev(`(()=>{const b=document.body.innerText||"";return /Log in|Sign up/i.test(b)||!localStorage.getItem("token");})()`).catch(() => false)
-        if (!out) return true
+        if (!(await sessionLost())) return true
         const token = accToken(a.email)
         if (!token) { dlog('session lost but no JWT in data.json for re-login'); return false }
         dlog('session lost — auto re-login (re-injecting JWT)')
@@ -219,9 +237,40 @@ function createDriver(a) {
         xdo('xdotool type --clearmodifiers --delay 20 "https://chat.qwen.ai/?temporary-chat=true"'); await sleep(500)
         xdo('xdotool key Return'); await sleep(9000)
         await ensureNoCaptcha().catch(() => {})
-        const ok = await ev(`(()=>{const b=document.body.innerText||"";return !/Log in|Sign up/i.test(b)&&!!localStorage.getItem("token");})()`).catch(() => false)
-        dlog(ok ? 'auto re-login OK' : 'auto re-login FAILED')
+        if (!(await sessionLost())) { dlog('auto re-login OK'); return true }
+        // Qwen moved the SPA to auth.qwen.ai v2 (15-min access_token renewed via a `refresh_token`
+        // cookie). Once that refresh_token is revoked, the SPA wipes an injected JWT and sets
+        // qwen_token_logged_out_marker — injection can no longer heal it (seen 13–15.10.2026 on
+        // alexgodikov/noootik00). Fall back to a real password login through the UI form, which
+        // issues a fresh refresh_token. Rate-limited so a bad password can't hammer the account.
+        const ok = await passwordLogin().catch(e => { dlog('password re-login error:', e.message); return false })
+        dlog(ok ? 'auto re-login OK (password form)' : 'auto re-login FAILED')
         return ok
+    }
+    const PW_LOGIN_EVERY_MS = 30 * 60 * 1000
+    async function passwordLogin() {
+        const pw = accPassword(a.email)
+        if (!pw) { dlog('no password in data.json for form re-login'); return false }
+        if (Date.now() - (a.lastPwLogin || 0) < PW_LOGIN_EVERY_MS) { dlog('password re-login skipped (tried <30min ago)'); return false }
+        a.lastPwLogin = Date.now()
+        dlog('session still lost — logging in via password form')
+        const nav = async (url, wait) => { xdo('xdotool key ctrl+l'); await sleep(600); xdo(`xdotool type --clearmodifiers --delay 20 "${url}"`); await sleep(500); xdo('xdotool key Return'); await sleep(wait) }
+        await nav('https://chat.qwen.ai/auth?action=signin', 9000)
+        await ensureNoCaptcha().catch(() => {})
+        const clickText = t => ev(`(()=>{const b=[...document.querySelectorAll('button,a,span,div')].filter(x=>x.innerText&&x.innerText.trim()===${JSON.stringify(t)}&&x.getBoundingClientRect().width>0).pop();if(!b)return false;b.click();return true})()`)
+        // the form opens on "login with verification code"; switch to the password variant
+        if (!(await ev(`!!document.querySelector('input[type=password]')`))) { await clickText('Log in with a password'); await sleep(2500) }
+        const fill = (sel, val) => ev(`(()=>{const i=document.querySelector(${JSON.stringify(sel)});if(!i)return false;i.focus();Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,${JSON.stringify(val)});i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}));return true})()`)
+        if (!(await fill('input[name=email]', a.email)) || !(await fill('input[type=password]', pw))) { dlog('password form not found'); return false }
+        await sleep(500)
+        if (!(await clickText('Log in'))) { dlog('password form: no "Log in" button'); return false }
+        for (let i = 0; i < 20; i++) {   // signin → SPA redirects off /auth and stores the access_token state
+            await sleep(1000)
+            if (await ev(`!/\\/auth/.test(location.pathname)&&!!localStorage.getItem('qwen_access_token_state')`).catch(() => false)) break
+        }
+        await nav('https://chat.qwen.ai/?temporary-chat=true', 9000)
+        await ensureNoCaptcha().catch(() => {})
+        return !(await sessionLost())
     }
     const isTemp = () => ev(`/temporary-chat=true/.test(location.href)`)
     const pageError = () => ev(`(()=>{const u=location.href||'';const b=(document.body&&document.body.innerText)||'';return /^chrome-error|^about:neterror/i.test(u)||/ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|This site can.t be reached|can.t be reached/i.test(b);})()`)
@@ -247,19 +296,33 @@ function createDriver(a) {
         dlog('temporary chat: off (could not enter — translation may be unreliable)')
         return false
     }
-    const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max' }
-    const curModel = () => ev(`(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length<5&&/Qwen3\\.[67]-(Max|Plus)/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700);return e?e.textContent.trim():"";})()`)
+    // Qwen rolls the flagship out IN PLACE and per account (3.6 -> 3.7 -> 3.8 ...; on 03.08.2026 one
+    // account already showed Qwen3.8-Max while the rest were on 3.7). Match a version RANGE and accept
+    // the same tier under a new name — otherwise a rename leaves selectModel empty-handed, which cools
+    // every account with drive_failed and stalls editing.
+    const MODEL_RE = String.raw`Qwen3\.[6-9]-(Max|Plus)`
+    const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max' }
+    const tierOf = (s) => (/-Max/.test(s) ? 'Max' : /-Plus/.test(s) ? 'Plus' : '')
+    const modelAlias = {}   // wanted label -> label this UI actually offers (learned once per account)
+    const curModel = () => ev(`(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length<5&&/${MODEL_RE}/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700);return e?e.textContent.trim():"";})()`)
     async function selectModel(model) {
-        const label = MODEL_LABEL[(model || '').toLowerCase()] || 'Qwen3.7-Max'
+        const want = MODEL_LABEL[(model || '').toLowerCase()] || 'Qwen3.7-Max'
+        const label = modelAlias[want] || want
         for (let attempt = 0; attempt < 4; attempt++) {
             if (await curModel() === label) { if (attempt) dlog('model =>', label); return true }
-            const sel = await ev(`(()=>{const e=[...document.querySelectorAll("*")].filter(x=>x.children.length<5&&/Qwen3\\.[67]-(Max|Plus)/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700&&x.getBoundingClientRect().width<200)[0];if(!e)return null;const b=e.getBoundingClientRect();return [Math.round(b.x+b.width/2),Math.round(b.y+b.height/2)];})()`)
+            const sel = await ev(`(()=>{const e=[...document.querySelectorAll("*")].filter(x=>x.children.length<5&&/${MODEL_RE}/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700&&x.getBoundingClientRect().width<200)[0];if(!e)return null;const b=e.getBoundingClientRect();return [Math.round(b.x+b.width/2),Math.round(b.y+b.height/2)];})()`)
             if (sel) { await clickScreen(sel[0] + a.off.x, sel[1] + a.off.y); await sleep(1300) }
             await clickByText(label); await sleep(1300)
             if (await curModel() === label) { dlog('model =>', label); return true }
             xdo('xdotool key Escape'); await sleep(500)
         }
-        dlog('model =>', await curModel(), `(WANTED ${label}!)`)
+        const cur = await curModel()
+        if (cur && tierOf(cur) === tierOf(want)) {   // same tier under a new name -> take it, remember it
+            modelAlias[want] = cur
+            dlog('model =>', cur, `(renamed upstream, wanted ${want})`)
+            return true
+        }
+        dlog('model =>', cur, `(WANTED ${label}!)`)
         return false
     }
     const thinkSel = `(()=>{const t=document.querySelector("textarea");if(!t)return null;const tr=t.getBoundingClientRect();return [...document.querySelectorAll("*")].filter(x=>x.children.length<=2&&/^(Thinking|Fast)$/.test(x.textContent.trim())&&x.getBoundingClientRect().width>0&&Math.abs(x.getBoundingClientRect().y-tr.y)<70&&x.getBoundingClientRect().x>tr.x)[0]||null;})()`
@@ -566,4 +629,34 @@ const server = http.createServer((req, res) => {
 server.listen(LISTEN, process.env.BROWSER_CHANNEL_HOST || '0.0.0.0', () => log(`browser-channel (CONCURRENT) on :${LISTEN} — pool(${POOL.length}): ${POOL.map(a => `${a.name}@${a.cdpPort}`).join(', ')}`))
 // watchdog: keep the socat CDP bridge alive on EVERY pool container
 setInterval(() => { for (const a of POOL) { try { ensureSocat(a.ctr, a.cdpPort, a.dbg) } catch (e) {} } }, 120000)
+
+// watchdog: pool-wide wedge recovery. Per-account healing (cool -> recreateTab) can run out of road:
+// on 03.08.2026 every account recreated its tab and STILL could not drive the UI, so the whole pool sat
+// cooled for an hour until the service was restarted by hand. A process restart rebuilds every CDP
+// session and does clear it, so do that automatically once the pool has been dead long enough.
+// Deliberately narrow — restart ONLY for wedge-type reasons. upstream_unreachable / qwen_error mean the
+// uplink or Qwen itself is down: restarting fixes nothing there, those cooldowns just expire once the
+// outage ends. A quota-capped pool is skipped too — it needs the daily reset, not a restart.
+const WEDGE_REASONS = new Set(['drive_failed', 'eval_timeout', 'CDP connect failed'])
+const POOL_WEDGE_MS = Number(process.env.BC_POOL_WEDGE_MS || 10 * 60 * 1000)
+let wedgedSince = 0, lastSelfRestart = 0
+setInterval(() => {
+    const now = Date.now()
+    const day = new Date().toISOString().slice(0, 10)
+    const cooled = POOL.filter(a => now < a.coolUntil)
+    const wedged = cooled.filter(a => WEDGE_REASONS.has(a.coolReason)).length
+    const used = POOL.reduce((s, a) => s + (a.reqDay === day ? a.reqToday : 0), 0)
+    const capped = used >= DAILY_CAP * POOL.length * 0.85
+    if (!(cooled.length === POOL.length && wedged > POOL.length / 2 && !capped)) { wedgedSince = 0; return }
+    if (!wedgedSince) {
+        wedgedSince = now
+        log(`pool fully wedged (${wedged}/${POOL.length} ${[...WEDGE_REASONS][0]}-class, used ${used}) — self-restart in ${Math.round(POOL_WEDGE_MS / 60000)}min unless it clears`)
+        return
+    }
+    if (now - wedgedSince < POOL_WEDGE_MS || now - lastSelfRestart < 30 * 60 * 1000) return
+    lastSelfRestart = now
+    log(`pool wedged ${Math.round((now - wedgedSince) / 60000)}min — SELF-RESTART (systemd Restart=always brings us back in a few seconds)`)
+    for (const a of POOL) { try { if (a.client) a.client.close() } catch (e) {} }
+    process.exit(1)
+}, 60000)
 process.on('SIGTERM', () => { for (const a of POOL) { try { if (a.client) a.client.close() } catch (e) {} } process.exit(0) })
