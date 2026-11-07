@@ -304,7 +304,9 @@ function createDriver(a) {
     const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max' }
     const tierOf = (s) => (/-Max/.test(s) ? 'Max' : /-Plus/.test(s) ? 'Plus' : '')
     const modelAlias = {}   // wanted label -> label this UI actually offers (learned once per account)
-    const curModel = () => ev(`(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length<5&&/${MODEL_RE}/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700);return e?e.textContent.trim():"";})()`)
+    // The header may also contain the adjacent Upgrade button. Cache only the
+    // model name, otherwise the next request searches for "Qwen3.8-MaxUpgrade".
+    const curModel = () => ev(`(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length<5&&/${MODEL_RE}/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700);return e?(e.textContent.match(/${MODEL_RE}/)||[""])[0]:"";})()`)
     async function selectModel(model) {
         const want = MODEL_LABEL[(model || '').toLowerCase()] || 'Qwen3.7-Max'
         const label = modelAlias[want] || want
