@@ -1,0 +1,8 @@
+[Unit]
+Description=Queue hourly novelbins review in the existing Codex conversation
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/Qwen2API
+ExecStart=/usr/bin/python3 /home/user/Qwen2API/deploy/novelbins-hourly/enqueue.py
+TimeoutStartSec=120
