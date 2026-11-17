@@ -1,5 +1,16 @@
 # OPS Changelog — Qwen2API + novelbins
 
+## 2026-11-16 — Qwen4-Max-Preview вышла релизом «Qwen4-Max»
+
+Проба Qwen4 в 20:06 UTC: на всех 8 аккаунтах `model => Qwen3.7-Plus (WANTED Qwen4-Max-Preview!)`.
+Живой каталог `/api/models` из вкладки: превью исчезло, вместо него `qwen4-max | Qwen4-Max`
+(рядом qwen3.8-max, qwen3.7-max, qwen3.7-plus, qwen3.8-omni-flash, qwen3.5-omni-plus).
+В `browser-channel.js` MODEL_LABEL: `qwen4-max[-thinking]` и старые `qwen4.0-max-preview[-thinking]`
+→ `Qwen4-Max` (модель 51 в novelbins и BROWSER_CHANNEL_MODELS не менялись). Канал перезапущен
+между задачами; проба 20:10 — 6 акк. на Qwen4-Max, noomb/oliver `WANTED Qwen4-Max`.
+
+---
+
 ## 2026-07-13 — ✅ Парковка вкладок внедрена (снижение CPU/питания)
 
 commit af90213: `parkTab` уводит вкладку в about:blank после каждого запроса

@@ -301,8 +301,10 @@ function createDriver(a) {
     // the same tier under a new name — otherwise a rename leaves selectModel empty-handed, which cools
     // every account with drive_failed and stalls editing.
     // Qwen4-Max-Preview (11.11.2026) sits next to 3.8-Max, so the header can show it too.
+    // On 16.11.2026 the preview was released as "Qwen4-Max" (id qwen4-max) and the preview entry
+    // disappeared from the catalog; the old preview ids keep working as aliases of the release.
     const MODEL_RE = String.raw`Qwen(?:3\.[6-9]|4)-(?:Max|Plus)(?:-Preview)?`
-    const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max', 'qwen4.0-max-preview': 'Qwen4-Max-Preview', 'qwen4.0-max-preview-thinking': 'Qwen4-Max-Preview' }
+    const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max', 'qwen4-max': 'Qwen4-Max', 'qwen4-max-thinking': 'Qwen4-Max', 'qwen4.0-max-preview': 'Qwen4-Max', 'qwen4.0-max-preview-thinking': 'Qwen4-Max' }
     // The major version is part of the tier: a page stuck on Qwen4 must not pass for a renamed 3.8-Max.
     const tierOf = (s) => ((s.match(/^Qwen(\d)/) || [])[1] || '') + (/-Max/.test(s) ? 'Max' : /-Plus/.test(s) ? 'Plus' : '')
     const modelAlias = {}   // wanted label -> label this UI actually offers (learned once per account)
