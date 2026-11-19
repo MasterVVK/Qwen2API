@@ -35,6 +35,7 @@ function mkAccount(o) {
         client: null, off: null, coolUntil: 0, coolReason: null, lastUsed: 0, busy: false, driver: null,
         ok: 0, fail: 0, lastError: null,   // status counters (surfaced in /health)
         reqDay: '', reqToday: 0,           // per-account daily request count vs Qwen ~DAILY_CAP/day quota
+        modelSkip: {},                     // model label -> ms until this account is tried again for it
     }
 }
 function loadPool() {
@@ -93,6 +94,19 @@ function reloadPool() {
 // process (which Restart=always would turn into a full restart — the very drop we avoid).
 process.on('SIGHUP', () => { log('SIGHUP — reloading pool'); reloadPool() })
 function coolAccount(a, ms, why) { a.coolUntil = Date.now() + ms; a.coolReason = why; log(`account ${a.name} cooling ${Math.round(ms / 60000)}min (${why})`) }
+// One model failing on an account (missing from its catalog, or that model's own daily quota spent) says
+// nothing about the tab: the account still serves other models. So skip just that model for a while —
+// no account cooling, no tab recreate, no pool-wedge count. Qwen4-Max has a much smaller daily quota than
+// 3.8-Max, and noomb/oliver never get Qwen4-Max at all; treating either as drive_failed recreated their
+// tabs ~40 times in two days and repeatedly armed the pool self-restart.
+function skipModel(a, label, ms, why) { a.modelSkip[label] = Date.now() + ms; log(`account ${a.name} skip ${label} ${Math.round(ms / 60000)}min (${why})`) }
+const skipsModel = (a, label, now) => Boolean(label) && a.modelSkip[label] > now
+// API model id -> label in the chat.qwen.ai model picker. On 16.11.2026 Qwen4-Max-Preview was released as
+// "Qwen4-Max" (id qwen4-max) and the preview entry disappeared; the old preview ids stay as aliases.
+const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max', 'qwen4-max': 'Qwen4-Max', 'qwen4-max-thinking': 'Qwen4-Max', 'qwen4.0-max-preview': 'Qwen4-Max', 'qwen4.0-max-preview-thinking': 'Qwen4-Max' }
+// No model -> the historical default; an id we don't know -> undefined (rejected with 400, never silently
+// served by some other model).
+const modelLabel = (model) => (model ? MODEL_LABEL[String(model).toLowerCase()] : 'Qwen3.7-Max')
 // Frozen-renderer recovery. A hung page target makes every Runtime.evaluate time out (eval_timeout) AND
 // is unreachable by Page.* (even Page.enable/captureScreenshot hang/error) — only the BROWSER-level /json
 // HTTP endpoints stay alive. So recover by recreating the tab through those: open a fresh chat.qwen.ai
@@ -300,19 +314,20 @@ function createDriver(a) {
     // account already showed Qwen3.8-Max while the rest were on 3.7). Match a version RANGE and accept
     // the same tier under a new name — otherwise a rename leaves selectModel empty-handed, which cools
     // every account with drive_failed and stalls editing.
-    // Qwen4-Max-Preview (11.11.2026) sits next to 3.8-Max, so the header can show it too.
-    // On 16.11.2026 the preview was released as "Qwen4-Max" (id qwen4-max) and the preview entry
-    // disappeared from the catalog; the old preview ids keep working as aliases of the release.
-    const MODEL_RE = String.raw`Qwen(?:3\.[6-9]|4)-(?:Max|Plus)(?:-Preview)?`
-    const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwen3.7-Max', 'qwen3.8-max': 'Qwen3.8-Max', 'qwen3.8-max-thinking': 'Qwen3.8-Max', 'qwen3.7-plus': 'Qwen3.7-Plus', 'qwen3.6-plus': 'Qwen3.6-Plus', 'qwen3-max': 'Qwen3.7-Max', 'qwen4-max': 'Qwen4-Max', 'qwen4-max-thinking': 'Qwen4-Max', 'qwen4.0-max-preview': 'Qwen4-Max', 'qwen4.0-max-preview-thinking': 'Qwen4-Max' }
+    // Qwen4-Max-Preview (11.11.2026) sits next to 3.8-Max, so the header can show it too; a point
+    // release of 4 (e.g. Qwen4.1-Max) must still match, or the header reads empty on every account.
+    const MODEL_RE = String.raw`Qwen(?:3\.[6-9]|4(?:\.\d)?)-(?:Max|Plus)(?:-Preview)?`
     // The major version is part of the tier: a page stuck on Qwen4 must not pass for a renamed 3.8-Max.
     const tierOf = (s) => ((s.match(/^Qwen(\d)/) || [])[1] || '') + (/-Max/.test(s) ? 'Max' : /-Plus/.test(s) ? 'Plus' : '')
+    const versionOf = (s) => parseFloat((s.match(/^Qwen(\d+(?:\.\d+)?)/) || [])[1] || '0')
     const modelAlias = {}   // wanted label -> label this UI actually offers (learned once per account)
     // The header may also contain the adjacent Upgrade button. Cache only the
     // model name, otherwise the next request searches for "Qwen3.8-MaxUpgrade".
     const curModel = () => ev(`(()=>{const e=[...document.querySelectorAll("*")].find(x=>x.children.length<5&&/${MODEL_RE}/.test(x.textContent)&&x.textContent.replace(/\\s/g,"").length<20&&x.getBoundingClientRect().y<120&&x.getBoundingClientRect().x<700);return e?(e.textContent.match(/${MODEL_RE}/)||[""])[0]:"";})()`)
+    // true = selected; 'unavailable' = the picker works but this model is not on offer here (not in the
+    // account's catalog, or Qwen swapped it for Plus after its quota ran out); false = UI unusable.
     async function selectModel(model) {
-        const want = MODEL_LABEL[(model || '').toLowerCase()] || 'Qwen3.7-Max'
+        const want = modelLabel(model)
         const label = modelAlias[want] || want
         for (let attempt = 0; attempt < 4; attempt++) {
             if (await curModel() === label) { if (attempt) dlog('model =>', label); return true }
@@ -323,13 +338,16 @@ function createDriver(a) {
             xdo('xdotool key Escape'); await sleep(500)
         }
         const cur = await curModel()
-        if (cur && tierOf(cur) === tierOf(want)) {   // same tier under a new name -> take it, remember it
+        // Same tier under a newer (or equal) version = renamed in place -> take it and remember it. Never an
+        // older one: the catalog lists 3.8-Max and 3.7-Max side by side, so a picker that merely failed to
+        // switch must not pin every later 3.8 request on this account to 3.7-Max.
+        if (cur && tierOf(cur) === tierOf(want) && versionOf(cur) >= versionOf(want)) {
             modelAlias[want] = cur
             dlog('model =>', cur, `(renamed upstream, wanted ${want})`)
             return true
         }
         dlog('model =>', cur, `(WANTED ${label}!)`)
-        return false
+        return cur ? 'unavailable' : false
     }
     const thinkSel = `(()=>{const t=document.querySelector("textarea");if(!t)return null;const tr=t.getBoundingClientRect();return [...document.querySelectorAll("*")].filter(x=>x.children.length<=2&&/^(Thinking|Fast)$/.test(x.textContent.trim())&&x.getBoundingClientRect().width>0&&Math.abs(x.getBoundingClientRect().y-tr.y)<70&&x.getBoundingClientRect().x>tr.x)[0]||null;})()`
     const curThink = () => ev(`(()=>{const e=${thinkSel};return e?e.textContent.trim():"";})()`)
@@ -413,10 +431,14 @@ function createDriver(a) {
         for (let attempt = 1; attempt <= MAX_CONTENT_RETRIES; attempt++) {
             await ensureNoCaptcha()
             await temporaryChat()
-            if (!(await selectModel(opts.model))) throw new Error('drive_failed')
+            const picked = await selectModel(opts.model)
+            if (picked === 'unavailable') throw new Error('model_unavailable')
+            if (!picked) throw new Error('drive_failed')
             await setThinkingMode(opts.thinking !== false)
             await ensureNoCaptcha()
-            if (!(await sendPrompt(opts.content != null ? String(opts.content) : ''))) throw new Error('drive_failed')
+            // The model is selected and the composer works, so a send that never starts generating is that
+            // model's daily limit ("waiting for send to take"), not a broken tab.
+            if (!(await sendPrompt(opts.content != null ? String(opts.content) : ''))) throw new Error('send_blocked')
             await sleep(2500)
             await ensureNoCaptcha()
             try {
@@ -492,27 +514,29 @@ function createDriver(a) {
 function driverFor(a) { return a.driver || (a.driver = createDriver(a)) }
 
 // ── concurrent dispatch: each request takes a free account; up to POOL.length run at once ──
-function pickFree(tried) {
+function pickFree(tried, label) {
     const now = Date.now()
-    const free = POOL.filter(x => !x.busy && now >= x.coolUntil && !tried.has(x))
+    const free = POOL.filter(x => !x.busy && now >= x.coolUntil && !tried.has(x) && !skipsModel(x, label, now))
     free.sort((x, y) => x.lastUsed - y.lastUsed)   // least-recently-used first
     return free[0] || null
 }
-async function acquireAccount(tried) {
+async function acquireAccount(tried, label) {
     for (;;) {
-        const a = pickFree(tried)
+        const a = pickFree(tried, label)
         if (a) { a.busy = true; a.lastUsed = Date.now(); return a }
-        // none free right now: wait only if some not-yet-tried account is busy (will free up).
-        // if every remaining account is cooling/tried, give up so the caller can fail the request.
-        if (!POOL.some(x => !tried.has(x) && x.busy)) return null
+        // none free right now: wait only if some not-yet-tried account is busy (will free up) and could
+        // serve this model. If every remaining account is cooling/tried/skipping it, give up so the
+        // caller can fail the request.
+        if (!POOL.some(x => !tried.has(x) && x.busy && !skipsModel(x, label, Date.now()))) return null
         await sleep(800)
     }
 }
-async function withAccount(fn) {
+// label = the requested model's picker label; omit it for requests that don't pick a model (images).
+async function withAccount(fn, label) {
     const tried = new Set()
     let lastErr
     for (let i = 0; i < POOL.length; i++) {
-        const a = await acquireAccount(tried)
+        const a = await acquireAccount(tried, label)
         if (!a) break
         tried.add(a)
         if (POOL.length > 1) log(`using account ${a.name} (cdp ${a.cdpPort})`)
@@ -520,6 +544,8 @@ async function withAccount(fn) {
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
+            if (e.message === 'model_unavailable') { skipModel(a, label, 30 * 60 * 1000, e.message); continue }
+            if (e.message === 'send_blocked') { skipModel(a, label, 20 * 60 * 1000, e.message); continue }
             // upstream_unreachable = this account's proxy/internet is down. Each account has its OWN
             // proxy (often on different hosts), so a dead proxy is per-account, NOT global: cool this
             // one (5min, proxy may come back) and fail over to healthy accounts instead of throwing —
@@ -537,12 +563,11 @@ async function withAccount(fn) {
                 continue
             }
             // drive_failed = page loaded but UI unusable (SPA rendered blank / no textarea / model picker never
-            // appeared) — a wedged-but-authenticated tab where selectModel/sendPrompt keep failing and reqToday
+            // appeared) — a wedged-but-authenticated tab where selectModel keeps failing and reqToday
             // freezes. Like eval_timeout, cooling+retrying the same tab loops forever, so after 3 in a row
-            // recreate the tab so the account self-heals. GUARD: only recreate when the account still has quota
-            // headroom — hitting the DAILY LIMIT also surfaces as drive_failed (send can't start generation), but
-            // a capped account needs the daily reset, NOT a tab recreate. A wedged tab has LOW reqToday; a capped
-            // one is nearCap. So skip recreate when nearCap (avoids uselessly recreating quota-capped tabs).
+            // recreate the tab so the account self-heals. A spent daily limit is send_blocked/model_unavailable
+            // (handled above), not this; the nearCap guard stays as a backstop — a capped account needs the
+            // daily reset, NOT a tab recreate.
             if (e.message === 'drive_failed') {
                 a.driveFail = (a.driveFail || 0) + 1
                 coolAccount(a, 5 * 60 * 1000, 'drive_failed')
@@ -564,7 +589,8 @@ const server = http.createServer((req, res) => {
         const now = Date.now()
         const today = new Date().toISOString().slice(0, 10)
         const todayReq = a => (a.reqDay === today ? a.reqToday : 0)
-        const accounts = POOL.map(a => ({ name: a.name, cdpPort: a.cdpPort, proxy: a.proxy, busy: a.busy, available: now >= a.coolUntil, coolForMin: a.coolUntil > now ? Math.round((a.coolUntil - now) / 60000) : 0, coolReason: a.coolUntil > now ? a.coolReason : null, ok: a.ok, fail: a.fail, lastError: a.lastError, reqToday: todayReq(a), remaining: Math.max(0, DAILY_CAP - todayReq(a)), nearCap: todayReq(a) >= DAILY_CAP * 0.85 }))
+        const skippedModels = a => Object.fromEntries(Object.entries(a.modelSkip).filter(([, until]) => until > now).map(([m, until]) => [m, Math.round((until - now) / 60000)]))
+        const accounts = POOL.map(a => ({ name: a.name, cdpPort: a.cdpPort, proxy: a.proxy, busy: a.busy, available: now >= a.coolUntil, coolForMin: a.coolUntil > now ? Math.round((a.coolUntil - now) / 60000) : 0, coolReason: a.coolUntil > now ? a.coolReason : null, skipModelsMin: skippedModels(a), ok: a.ok, fail: a.fail, lastError: a.lastError, reqToday: todayReq(a), remaining: Math.max(0, DAILY_CAP - todayReq(a)), nearCap: todayReq(a) >= DAILY_CAP * 0.85 }))
         const free = accounts.filter(x => x.available && !x.busy).length
         const usedToday = accounts.reduce((s, x) => s + x.reqToday, 0)
         res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, pool: accounts.length, free, day: today, dailyCap: DAILY_CAP, usedToday, capacityToday: DAILY_CAP * accounts.length, accounts }))
@@ -573,6 +599,12 @@ const server = http.createServer((req, res) => {
         const chunks = []; req.on('data', d => chunks.push(d))
         req.on('end', async () => {
             let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
+            const label = modelLabel(body.model)
+            if (!label) {
+                log(`error: unknown model ${body.model}`)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify({ error: { message: `unknown model: ${body.model}`, type: 'invalid_request_error' } }))
+            }
             const wantStream = body.stream !== false
             const id = 'chatcmpl-' + Math.random().toString(36).slice(2, 10), created = Math.floor(Date.now() / 1000)
             // report which pool account handled this so the proxy can attribute token usage to it.
@@ -582,7 +614,7 @@ const server = http.createServer((req, res) => {
             const streamHead = () => { if (!headDone) { headDone = true; res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'x-pool-email': usedEmail }) } }
             const send = c => { if (wantStream) { streamHead(); if (c) res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta: { content: c }, finish_reason: null }] })}\n\n`) } }
             try {
-                const text = await withAccount((drv, a) => { usedEmail = a.email || ''; return drv.runViaUI(body, send) })
+                const text = await withAccount((drv, a) => { usedEmail = a.email || ''; return drv.runViaUI(body, send) }, label)
                 // incomplete = an open <think> survives after removing balanced <think>…</think>
                 // blocks → reasoning never reached an answer (mid-think read or thinking-cap spiral).
                 // Don't pass it off as finish_reason:'stop' (a false success) — signal truncation
