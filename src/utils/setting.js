@@ -24,7 +24,11 @@ const saveAccounts = async (email, password, token, expires, proxy = null) => {
     }
 
     // 使用账户管理器的统一方法
-    const success = await accountManager.addAccount(email, password, proxy)
+    // the caller (dashboard /setAccount) already signed in — a second login here would fail when
+    // the token came from the browser-channel fallback, so keep the token we were given
+    const success = token
+      ? await accountManager.addAccountWithToken(email, password, token, expires, proxy)
+      : await accountManager.addAccount(email, password, proxy)
 
     if (success) {
       logger.success(`账户 ${email} 保存成功`, 'SETTING')

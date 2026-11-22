@@ -266,16 +266,19 @@ class DataPersistence {
   }
 
   /**
-   * 批量保存到文件
+   * 批量保存到文件（MERGE 语义）
+   * Records missing from `accounts` stay in the file: a full overwrite here used to erase every
+   * account the in-memory list had dropped (13.11.2026 — 5 of 8 accounts, passwords included, lost
+   * on the daily stats save). Removing an account is an explicit deleteAccount() call.
    * @private
    */
   async _saveAllToFile(accounts) {
     await this._ensureDataFileExists()
-    
+
     const fileContent = await fs.readFile(this.dataFilePath, 'utf-8')
     const data = JSON.parse(fileContent)
-    
-    data.accounts = accounts.map(account => ({
+
+    const saved = accounts.map(account => ({
       email: account.email,
       password: account.password,
       token: account.token,
@@ -284,9 +287,42 @@ class DataPersistence {
       stats: account.stats ?? undefined,
       statsHistory: account.statsHistory ?? undefined
     }))
+    const savedByEmail = new Map(saved.map(account => [account.email, account]))
+    const fileAccounts = data.accounts || []
+    const fileEmails = new Set(fileAccounts.map(account => account.email))
+    data.accounts = [
+      ...fileAccounts.map(account => savedByEmail.get(account.email) || account),
+      ...saved.filter(account => !fileEmails.has(account.email))
+    ]
 
     await fs.writeFile(this.dataFilePath, JSON.stringify(data, null, 2), 'utf-8')
     return true
+  }
+
+  /**
+   * 删除账户数据（从持久化存储中移除）
+   * @param {string} email - 邮箱
+   * @returns {Promise<boolean>} 删除是否成功
+   */
+  async deleteAccount(email) {
+    try {
+      switch (config.dataSaveMode) {
+        case 'redis':
+          return await redisClient.deleteAccount(email)
+        case 'file': {
+          await this._ensureDataFileExists()
+          const data = JSON.parse(await fs.readFile(this.dataFilePath, 'utf-8'))
+          data.accounts = (data.accounts || []).filter(account => account.email !== email)
+          await fs.writeFile(this.dataFilePath, JSON.stringify(data, null, 2), 'utf-8')
+          return true
+        }
+        default:
+          return false
+      }
+    } catch (error) {
+      logger.error(`删除账户数据失败 (${email})`, 'DATA', '', error)
+      return false
+    }
   }
 
   /**

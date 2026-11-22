@@ -1,7 +1,10 @@
 const axios = require('axios')
+const http = require('http')
 const { sha256Encrypt, JwtDecode } = require('./tools')
 const { logger } = require('./logger')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('./proxy-helper')
+
+const BC_URL = process.env.BROWSER_CHANNEL_URL || 'http://172.25.0.1:9100'
 
 /**
  * 令牌管理器
@@ -27,9 +30,61 @@ class TokenManager {
      * @param {string} email - 邮箱
      * @param {string} password - 密码
      * @param {Object} [account] - 账户对象（用于解析账号级代理；为空时回退到全局 PROXY_URL）
+     * @param {{viaBrowser?: boolean}} [opts] - viaBrowser: fall back to the browser channel's password-form
+     *   login. Only for explicit dashboard actions — it drives the account's live tab, so the 6-hourly
+     *   auto refresh must not use it.
      * @returns {Promise<string|null>} 令牌或null
      */
-    async login(email, password, account) {
+    async login(email, password, account, opts = {}) {
+        const token = await this._loginDirect(email, password, account)
+        if (token || !opts.viaBrowser) return token
+        return await this.loginViaBrowserChannel(email, password)
+    }
+
+    /**
+     * Sign in through the account's own browser in the channel pool (POST /login on the channel).
+     * Qwen's WAF answers the server-side /api/v1/auths/signin with 405 since 11.2026, while the
+     * password form in a real browser still works and leaves the session token in localStorage.
+     * @param {string} email - 邮箱
+     * @param {string} password - 密码
+     * @returns {Promise<string|null>} 令牌或null
+     */
+    loginViaBrowserChannel(email, password) {
+        return new Promise(resolve => {
+            const payload = JSON.stringify({ email, password })
+            const u = new URL(BC_URL + '/login')
+            logger.info(`${email} 直接登录失败，改用浏览器通道登录`, 'AUTH', '🌐')
+            const request = http.request({
+                method: 'POST', hostname: u.hostname, port: u.port, path: u.pathname,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+                // the channel first waits for an in-flight request on that account (up to 10 min)
+                timeout: 15 * 60 * 1000
+            }, response => {
+                let body = ''
+                response.on('data', chunk => body += chunk)
+                response.on('end', () => {
+                    let json = null
+                    try { json = JSON.parse(body) } catch (_) {}
+                    if (response.statusCode === 200 && json && json.token) {
+                        logger.success(`${email} 浏览器通道登录成功`, 'AUTH')
+                        return resolve(json.token)
+                    }
+                    logger.error(`${email} 浏览器通道登录失败: ${(json && json.error) || response.statusCode}`, 'AUTH')
+                    resolve(null)
+                })
+            })
+            request.on('error', error => { logger.error(`${email} 浏览器通道不可用: ${error.message}`, 'AUTH'); resolve(null) })
+            request.on('timeout', () => request.destroy(new Error('timeout')))
+            request.write(payload)
+            request.end()
+        })
+    }
+
+    /**
+     * 直接调用 /api/v1/auths/signin 登录
+     * @private
+     */
+    async _loginDirect(email, password, account) {
         try {
             const proxyAgent = getProxyAgent(account)
             const requestConfig = {

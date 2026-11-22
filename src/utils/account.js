@@ -373,31 +373,25 @@ class Account {
     }
 
     /**
-     * 验证和清理无效令牌
+     * 验证令牌：过期的尝试重新登录
+     * An account whose re-login fails stays loaded with its stale token: dropping it here hid it from
+     * the dashboard and let the next full save erase it from data.json (13.11.2026).
      * @private
      */
     async _validateAndCleanTokens() {
-        const validAccounts = []
-
         for (const account of this.accountTokens) {
-            if (account.token && this.tokenManager.validateToken(account.token)) {
-                validAccounts.push(account)
-            } else if (account.email && account.password) {
-                // 尝试重新登录
-                logger.info(`令牌无效，尝试重新登录: ${account.email}`, 'TOKEN', '🔄')
-                const newToken = await this.tokenManager.login(account.email, account.password, account)
-                if (newToken) {
-                    const decoded = this.tokenManager.validateToken(newToken)
-                    if (decoded) {
-                        account.token = newToken
-                        account.expires = decoded.exp
-                        validAccounts.push(account)
-                    }
-                }
+            if (account.token && this.tokenManager.validateToken(account.token)) continue
+            if (!account.email || !account.password) continue
+            logger.info(`令牌无效，尝试重新登录: ${account.email}`, 'TOKEN', '🔄')
+            const newToken = await this.tokenManager.login(account.email, account.password, account)
+            const decoded = newToken && this.tokenManager.validateToken(newToken)
+            if (decoded) {
+                account.token = newToken
+                account.expires = decoded.exp
+                continue
             }
+            logger.warn(`重新登录失败，保留账户（令牌无效）: ${account.email}`, 'TOKEN')
         }
-
-        this.accountTokens = validAccounts
     }
 
 
@@ -656,12 +650,14 @@ class Account {
 
     /**
      * 用户登录（委托给 TokenManager）
+     * Used by the dashboard add-account routes, so it may fall back to signing in through the
+     * account's own browser in the channel pool (the server-side signin is blocked by Qwen's WAF).
      * @param {string} email - 邮箱
      * @param {string} password - 密码
      * @returns {Promise<string|null>} 令牌或null
      */
     async login(email, password) {
-        return await this.tokenManager.login(email, password)
+        return await this.tokenManager.login(email, password, null, { viaBrowser: true })
     }
 
     /**
@@ -933,6 +929,9 @@ class Account {
 
             // 更新轮询器
             this.accountRotator.setAccounts(this.accountTokens)
+
+            // 从持久化存储中移除（批量保存是合并语义，不会再顺带删掉它）
+            await this.dataPersistence.deleteAccount(email)
 
             logger.success(`成功移除账户: ${email}`, 'ACCOUNT')
             return true

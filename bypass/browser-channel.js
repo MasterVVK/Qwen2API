@@ -262,13 +262,15 @@ function createDriver(a) {
         return ok
     }
     const PW_LOGIN_EVERY_MS = 30 * 60 * 1000
-    async function passwordLogin() {
-        const pw = accPassword(a.email)
+    const nav = async (url, wait) => { xdo('xdotool key ctrl+l'); await sleep(600); xdo(`xdotool type --clearmodifiers --delay 20 "${url}"`); await sleep(500); xdo('xdotool key Return'); await sleep(wait) }
+    // explicitPw: a password handed in by POST /login (dashboard «add account») — not rate-limited,
+    // since it is a one-off manual action rather than the self-heal loop.
+    async function passwordLogin(explicitPw) {
+        const pw = explicitPw || accPassword(a.email)
         if (!pw) { dlog('no password in data.json for form re-login'); return false }
-        if (Date.now() - (a.lastPwLogin || 0) < PW_LOGIN_EVERY_MS) { dlog('password re-login skipped (tried <30min ago)'); return false }
+        if (!explicitPw && Date.now() - (a.lastPwLogin || 0) < PW_LOGIN_EVERY_MS) { dlog('password re-login skipped (tried <30min ago)'); return false }
         a.lastPwLogin = Date.now()
-        dlog('session still lost — logging in via password form')
-        const nav = async (url, wait) => { xdo('xdotool key ctrl+l'); await sleep(600); xdo(`xdotool type --clearmodifiers --delay 20 "${url}"`); await sleep(500); xdo('xdotool key Return'); await sleep(wait) }
+        dlog(explicitPw ? 'login requested — logging in via password form' : 'session still lost — logging in via password form')
         await nav('https://chat.qwen.ai/auth?action=signin', 9000)
         await ensureNoCaptcha().catch(() => {})
         const clickText = t => ev(`(()=>{const b=[...document.querySelectorAll('button,a,span,div')].filter(x=>x.innerText&&x.innerText.trim()===${JSON.stringify(t)}&&x.getBoundingClientRect().width>0).pop();if(!b)return false;b.click();return true})()`)
@@ -509,7 +511,26 @@ function createDriver(a) {
         return readImage()
     }
 
-    return { runViaUI, generateImage }
+    // POST /login: Qwen's WAF blocks qwen2api's server-side signin (405), so the dashboard signs in
+    // through this account's own browser. A live session is reused as is (its token returned
+    // without re-entering the password); otherwise the password form is filled with `pw`.
+    async function loginWithPassword(pw) {
+        await getClient()
+        await activateAndOffset()
+        // the drive's own navigation (window activate + verified, retried) — a bare omnibox nav from
+        // the parked about:blank tab could miss focus and leave the page blank
+        if (!(await temporaryChat())) throw new Error('login_failed')
+        // right after load the SPA paints the guest header (Log in / Sign up) until it restores the
+        // session, so one check reads a live session as lost — it must stay lost for ~12 s
+        let lost = true
+        for (let i = 0; i < 6 && lost; i++) { await sleep(2000); lost = await sessionLost() }
+        if (lost && !(await passwordLogin(pw))) throw new Error('login_failed')
+        const token = await ev(`localStorage.getItem('token')`)
+        if (!token) throw new Error('login_failed')
+        return token
+    }
+
+    return { runViaUI, generateImage, loginWithPassword }
 }
 function driverFor(a) { return a.driver || (a.driver = createDriver(a)) }
 
@@ -639,6 +660,33 @@ const server = http.createServer((req, res) => {
                     if (wantStream) { streamHead(); res.write(`data: ${JSON.stringify({ error: { message: errMsg, type } })}\n\n`); res.end() }
                     else { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: errMsg, type } })) }
                 } catch (_) {}
+            }
+        })
+        return
+    }
+    if (req.method === 'POST' && req.url.startsWith('/login')) {
+        const chunks = []; req.on('data', d => chunks.push(d))
+        req.on('end', async () => {
+            let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
+            const reply = (code, obj) => { try { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)) } catch (_) {} }
+            const email = String(body.email || '').toLowerCase()
+            const a = POOL.find(x => (x.email || '').toLowerCase() === email)
+            if (!a) return reply(404, { error: 'account_not_in_pool' })
+            if (!body.password) return reply(400, { error: 'password_required' })
+            // the account may be mid-request: wait for it rather than drive its tab concurrently
+            for (let i = 0; i < 600 && a.busy; i++) await sleep(1000)
+            if (a.busy) return reply(409, { error: 'account_busy' })
+            a.busy = true
+            try {
+                const token = await driverFor(a).loginWithPassword(String(body.password))
+                log(`login ok [${a.email}]`)
+                reply(200, { token })
+            } catch (e) {
+                log(`login failed [${a.email}]: ${e.message}`)
+                reply(502, { error: e.message })
+            } finally {
+                a.busy = false
+                try { parkTab(a) } catch (pe) {}
             }
         })
         return
