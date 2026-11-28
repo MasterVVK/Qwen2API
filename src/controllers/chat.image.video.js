@@ -1469,7 +1469,7 @@ const handleImageVideoCompletion = async (req, res) => {
             const prompt = typeof last === 'string' ? last : Array.isArray(last) ? last.map(p => (p && (p.text || p.content)) || '').join('') : ''
             const ratio = normalizeOpenAIImageVideoSize(req.body.size)
             const img = await browserChannel.imageViaChannel({ prompt, ratio })
-            return returnResponse(res, req.body.model, buildImageContent(img.url), downstreamStream)
+            return returnResponse(res, req.body.model, buildImageContent(browserChannel.channelImageUrl(req, img)), downstreamStream)
         } catch (error) {
             logger.error('browser-channel t2i 失败', 'CHAT', '', error)
             if (downstreamStream) return returnResponse(res, req.body.model, error?.message || 'image generation failed', true)
@@ -1603,7 +1603,9 @@ const handleOpenAIImagesGeneration = async (req, res) => {
         if (browserChannel.useBrowserChannelImage(req.body.model)) {
             const ratio = normalizeOpenAIImageVideoSize(req.body.size)
             const img = await browserChannel.imageViaChannel({ prompt: req.body.prompt, ratio })
-            const imageData = await buildOpenAIImageResultItem(img.url, req.body.response_format)
+            const imageData = req.body.response_format === 'b64_json' && img.b64
+                ? { b64_json: img.b64 }
+                : await buildOpenAIImageResultItem(browserChannel.channelImageUrl(req, img), req.body.response_format)
             return res.json({
                 created: Math.floor(Date.now() / 1000),
                 data: [imageData]

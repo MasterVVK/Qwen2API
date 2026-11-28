@@ -10,7 +10,7 @@
  * busy it waits; account-level failures (quota/stuck) cool that account and fail over to another.
  *
  * HTTP: POST /complete {model, content, stream?}  → SSE (OpenAI-ish) or JSON {content}
- *       POST /image    {prompt, ratio?}           → {url, width, height}
+ *       POST /image    {prompt, ratio?}           → {url, width, height, mime, b64, thumbnail}
  *       GET  /health
  * Env: SOLVER_CTR (default qwen2api-chrome-solver), BROWSER_CHANNEL_PORT (default 9100)
  */
@@ -107,6 +107,9 @@ const MODEL_LABEL = { 'qwen3.7-max': 'Qwen3.7-Max', 'qwen3.7-max-thinking': 'Qwe
 // No model -> the historical default; an id we don't know -> undefined (rejected with 400, never silently
 // served by some other model).
 const modelLabel = (model) => (model ? MODEL_LABEL[String(model).toLowerCase()] : 'Qwen3.7-Max')
+// Pseudo-label for image requests, so per-account image failures (limit, no "Create Image") skip only
+// images on that account via modelSkip.
+const IMAGE_LABEL = 'image'
 // Frozen-renderer recovery. A hung page target makes every Runtime.evaluate time out (eval_timeout) AND
 // is unreachable by Page.* (even Page.enable/captureScreenshot hang/error) — only the BROWSER-level /json
 // HTTP endpoints stay alive. So recover by recreating the tab through those: open a fresh chat.qwen.ai
@@ -471,30 +474,54 @@ function createDriver(a) {
         const ok = await clickByText(ratio); await sleep(800)
         dlog('ratio =>', ok ? ratio : 'failed')
     }
+    // A generated image takes ~2 min; past this the account is stuck, so fail over instead of riding the
+    // 50-min text timeout (25.11 an image request hung 50 min and came back empty).
+    const IMAGE_TIMEOUT_MS = Number(process.env.BC_IMAGE_TIMEOUT_MS || 5 * 60 * 1000)
     async function readImage() {
         const t0 = Date.now()
-        while (Date.now() - t0 < RESP_TIMEOUT_MS) {
+        while (Date.now() - t0 < IMAGE_TIMEOUT_MS) {
             await sleep(4000)
             if (await captcha.isCaptcha(a.client)) await ensureNoCaptcha()
-            if (await ev(`/daily usage limit|usage limit\\. Please wait/i.test(document.body.innerText||"")`).catch(() => false)) throw new Error('usage_limit')
+            if (await ev(`/daily usage limit|usage limit\\. Please wait/i.test(document.body.innerText||"")`).catch(() => false)) throw new Error('image_limit')
             if (await ev(`/Oops! There was an issue|Content Security Warning|inappropriate content/i.test(document.body.innerText||"")`).catch(() => false)) throw new Error('qwen_error')
-            const r = await evA(`(async()=>{
+            // The UI shows a thumbnail (x-oss-process=image/resize…); the original is the same URL without
+            // that parameter. Drop only that parameter: the signing `key` may come after it, and cutting
+            // the string there lost the key — the original then failed to load and we returned an 806x450
+            // thumbnail. The bytes are read here, inside chat.qwen.ai (the CDN allows that origin via CORS),
+            // because the bare URL fetched from outside the browser can 404 (24.11).
+            const r = await withTimeout(a.client.Runtime.evaluate({ returnByValue: true, awaitPromise: true, expression: `(async()=>{
                 const im=[...document.querySelectorAll("img")].filter(i=>/cdn\\.qwenlm\\.ai\\/output|\\/t2i\\//i.test(i.src||"")&&i.naturalWidth>50);
                 const i=im[im.length-1]; if(!i) return null;
-                const orig=i.src.split("x-oss-process")[0].replace(/[?&]$/,"");
-                const dim=await new Promise(res=>{const t=new Image();t.onload=()=>res([t.naturalWidth,t.naturalHeight]);t.onerror=()=>res(null);t.src=orig;setTimeout(()=>res(null),8000);});
-                return {src:orig, w:dim?dim[0]:i.naturalWidth, h:dim?dim[1]:i.naturalHeight};
-            })()`)
-            if (r) { dlog(`image: ${r.w}x${r.h} (full-res)`); return r }
+                const u=new URL(i.src,location.href); u.searchParams.delete("x-oss-process");
+                const read=async src=>{const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),60000);try{const r=await fetch(src,{signal:ctl.signal});if(!r.ok)return null;const blob=await r.blob();const bmp=await createImageBitmap(blob).catch(()=>null);const data=await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(String(fr.result));fr.onerror=()=>res("");fr.readAsDataURL(blob);});const m=data.match(/^data:([^;,]+);base64,(.*)$/);if(!m)return null;return {src,mime:m[1],b64:m[2],w:bmp?bmp.width:0,h:bmp?bmp.height:0};}catch(e){return null}finally{clearTimeout(tm)}};
+                const full=await read(u.toString());
+                if(full) return full;
+                const thumb=await read(i.src);
+                return thumb?Object.assign(thumb,{thumb:true}):{src:u.toString(),w:i.naturalWidth,h:i.naturalHeight,thumb:true};
+            })()` }).then(r => r.result.value), 90000)
+            if (r) {
+                dlog(`image: ${r.w}x${r.h}${r.thumb ? ' (THUMBNAIL — original did not load)' : ' (full-res)'}${r.b64 ? `, ${Math.round(r.b64.length * 3 / 4 / 1024)}KB bytes` : ', no bytes'}`)
+                return r
+            }
         }
-        return null
+        throw new Error('image_timeout')
     }
+    // The menu item has been "Create Image"; also accept a renamed / localized item. Log what the menu
+    // did show when nothing matched, so the next rename is visible in the journal.
+    const CREATE_IMAGE_RE = String.raw`^(create image|image generation|generate image|生成图像|图像生成|创建图像)$`
     async function openCreateImage() {
-        for (let attempt = 0; attempt < 3; attempt++) {
-            await clickPlus()
-            for (let i = 0; i < 8; i++) { if (await ev(`/Create Image/.test(document.body.innerText||"")`).catch(() => false)) break; await sleep(400) }
-            if (await clickByText('Create Image')) { await sleep(900); return true }
-            xdo('xdotool key Escape'); await sleep(400)
+        for (let i = 0; i < 20; i++) { if (await ev(`!!document.querySelector("textarea")`).catch(() => false)) break; await sleep(500) }
+        for (let attempt = 0; attempt < 4; attempt++) {
+            if (!(await clickPlus())) { dlog('image: "+" button not found'); await sleep(1500); continue }
+            let pos = null
+            for (let i = 0; i < 20 && !pos; i++) {   // the menu renders slowly on its first opening after a page load
+                pos = await ev(`(()=>{const re=new RegExp(${JSON.stringify(CREATE_IMAGE_RE)},"i");const e=[...document.querySelectorAll("*")].filter(x=>x.children.length===0&&re.test(x.textContent.trim())&&x.getBoundingClientRect().width>0)[0];if(!e)return null;const b=e.getBoundingClientRect();return [Math.round(b.x+b.width/2),Math.round(b.y+b.height/2)];})()`).catch(() => null)
+                if (!pos) await sleep(400)
+            }
+            if (pos) { await clickScreen(pos[0] + a.off.x, pos[1] + a.off.y); await sleep(900); return true }
+            const menu = await ev(`[...document.querySelectorAll("[role=menu] *,[role=menuitem],[class*=dropdown] *,[class*=popover] *")].filter(x=>x.children.length===0&&x.textContent.trim()&&x.getBoundingClientRect().width>0).map(x=>x.textContent.trim()).slice(0,20).join(" | ")`).catch(() => '')
+            dlog(`image: "Create Image" not in "+" menu (attempt ${attempt + 1}); menu: ${menu || '(nothing open)'}`)
+            xdo('xdotool key Escape'); await sleep(800)
         }
         return false
     }
@@ -505,6 +532,8 @@ function createDriver(a) {
         await temporaryChat()
         if (!(await openCreateImage())) throw new Error('create_image_not_found')
         await setImageRatio(opts.ratio)
+        // In image mode a started generation shows no text, so sendPrompt can report "not taken" while the
+        // image is in fact being drawn; readImage decides (image, limit banner, error or timeout).
         await sendPrompt(opts.content != null ? String(opts.content) : '')
         await sleep(2000)
         await ensureNoCaptcha()
@@ -565,6 +594,9 @@ async function withAccount(fn, label) {
         catch (e) {
             a.busy = false; a.fail++; a.lastError = e.message; lastErr = e
             if (e.message === 'usage_limit') { coolAccount(a, 14 * 3600 * 1000, 'usage_limit'); continue }
+            // Image failures say nothing about the account's text quota: skip images on it, keep it for text.
+            if (e.message === 'image_limit') { skipModel(a, label, 14 * 3600 * 1000, e.message); continue }
+            if (e.message === 'create_image_not_found' || e.message === 'image_timeout') { skipModel(a, label, 30 * 60 * 1000, e.message); continue }
             if (e.message === 'model_unavailable') { skipModel(a, label, 30 * 60 * 1000, e.message); continue }
             if (e.message === 'send_blocked') { skipModel(a, label, 20 * 60 * 1000, e.message); continue }
             // upstream_unreachable = this account's proxy/internet is down. Each account has its OWN
@@ -696,13 +728,13 @@ const server = http.createServer((req, res) => {
         req.on('end', async () => {
             let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch (e) { res.writeHead(400); return res.end('bad json') }
             try {
-                const img = await withAccount((drv) => drv.generateImage({ content: body.prompt || body.content, ratio: body.ratio }))
+                const img = await withAccount((drv) => drv.generateImage({ content: body.prompt || body.content, ratio: body.ratio }), IMAGE_LABEL)
                 res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ url: img ? img.src : '', width: img ? img.w : 0, height: img ? img.h : 0 }))
-                log(`image done: ${img ? `${img.w}x${img.h}` : 'none'}`)
+                res.end(JSON.stringify({ url: img.src, width: img.w, height: img.h, mime: img.mime || null, b64: img.b64 || null, thumbnail: Boolean(img.thumb) }))
+                log(`image done: ${img.w}x${img.h}${img.b64 ? ' +bytes' : ''}`)
             } catch (e) {
                 log('image error:', e.message)
-                const limited = e.message === 'usage_limit'
+                const limited = e.message === 'image_limit'
                 const code = limited ? 429 : 502
                 const errMsg = limited ? 'IMAGE_USAGE_LIMIT: qwen daily image-generation limit reached on this account' : e.message
                 try { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: errMsg })) } catch (_) {}

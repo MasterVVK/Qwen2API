@@ -38,6 +38,12 @@ app.use(verifyRouter)
 app.use('/api', accountsRouter)
 app.use('/api', settingsRouter)
 app.use('/api', require('./routes/captcha.js'))
+// images generated via the browser channel (see browser-channel-client.js); 404 rather than the SPA page
+app.get('/generated/:file', (req, res) => {
+  res.sendFile(req.params.file, { root: require('./utils/browser-channel-client.js').GENERATED_DIR }, (err) => {
+    if (err && !res.headersSent) res.status(404).end()
+  })
+})
 
 app.use(express.static(path.join(__dirname, '../public/dist')))
 

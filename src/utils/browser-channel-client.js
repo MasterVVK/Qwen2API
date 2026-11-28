@@ -10,6 +10,9 @@
  *   BROWSER_CHANNEL_MODELS  comma list of model ids to route via the browser, e.g. qwen3.7-max
  */
 const http = require('http')
+const fs = require('fs')
+const path = require('path')
+const crypto = require('crypto')
 const { logger } = require('./logger')
 const accountManager = require('./account.js')
 const { createUsageObject } = require('./precise-tokenizer.js')
@@ -74,6 +77,31 @@ function imageViaChannel({ prompt, ratio }) {
     })
 }
 
+// The channel reads the image bytes inside chat.qwen.ai, because the bare CDN link can 404 when fetched
+// outside the browser (24.11). Such images are served by this proxy from data/generated (route in
+// server.js) and pruned after a few days on the next save.
+const GENERATED_DIR = path.join(__dirname, '../../data/generated')
+const GENERATED_TTL_MS = 3 * 24 * 3600 * 1000
+const IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
+
+function storeChannelImage(img) {
+    fs.mkdirSync(GENERATED_DIR, { recursive: true })
+    const now = Date.now()
+    for (const f of fs.readdirSync(GENERATED_DIR)) {
+        const p = path.join(GENERATED_DIR, f)
+        if (now - fs.statSync(p).mtimeMs > GENERATED_TTL_MS) fs.rmSync(p, { force: true })
+    }
+    const name = `${crypto.randomUUID()}.${IMAGE_EXT[img.mime] || 'png'}`
+    fs.writeFileSync(path.join(GENERATED_DIR, name), Buffer.from(img.b64, 'base64'))
+    return name
+}
+
+// Link handed to the caller: our own copy when the channel sent bytes, otherwise the CDN link.
+function channelImageUrl(req, img) {
+    if (!img.b64) return img.url
+    return `${req.protocol}://${req.get('host')}/generated/${storeChannelImage(img)}`
+}
+
 // flatten OpenAI/qwen messages into a single prompt string (system + user, in order)
 function buildContent(messages) {
     return (messages || []).map(m => {
@@ -125,4 +153,4 @@ function delegate(req, res, model) {
     upstream.write(payload); upstream.end()
 }
 
-module.exports = { useBrowserChannel, delegate, useBrowserChannelImage, imageViaChannel }
+module.exports = { useBrowserChannel, delegate, useBrowserChannelImage, imageViaChannel, channelImageUrl, GENERATED_DIR }
